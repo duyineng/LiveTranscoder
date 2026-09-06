@@ -1,4 +1,4 @@
-#include "Transcoder.h"
+ï»¿#include "Transcoder.h"
 
 #include <algorithm>
 #include <array>
@@ -114,10 +114,10 @@ const AVCodec* findSoftwareH264Encoder() {
     // Prefer libx264 when the FFmpeg package was built with it. 
     // The generic H.264 lookup may otherwise select a hardware-only encoder (for example
     // h264_d3d12va) that cannot accept the CPU YUV420P frames used here.
-    if (const AVCodec* codec = avcodec_find_encoder_by_name("libx264")) {   // °´Ãû³ÆÑ°ÕÒ libx264 ±àÂëÆ÷
+    if (const AVCodec* codec = avcodec_find_encoder_by_name("libx264")) {   // æŒ‰åç§°å¯»æ‰¾ libx264 ç¼–ç å™¨
         return codec;
     }
-    if (const AVCodec* codec = avcodec_find_encoder_by_name("h264_mf")) {   // Windows Media Foundation µÄ H.264 ±àÂëÆ÷
+    if (const AVCodec* codec = avcodec_find_encoder_by_name("h264_mf")) {   // Windows Media Foundation çš„ H.264 ç¼–ç å™¨
         return codec;
     }
 
@@ -162,10 +162,10 @@ bool Transcoder::transcode(
     };
 
     if (options.width <= 0 || options.height <= 0) {
-        return fail("Output dimensions must be positive");  // Êä³ö³ß´ç±ØĞëÊÇÕıÊı
+        return fail("Output dimensions must be positive");  // è¾“å‡ºå°ºå¯¸å¿…é¡»æ˜¯æ­£æ•°
     }
 
-    // ´ò¿ªÈİÆ÷
+    // æ‰“å¼€å®¹å™¨
     AVFormatContext* inputRaw = nullptr;
     int ret = avformat_open_input(&inputRaw, inputUrl.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -174,13 +174,13 @@ bool Transcoder::transcode(
     InputPtr input(inputRaw);
     inputRaw = nullptr;
 
-    // »ñÈ¡¸÷ÌõÁ÷µÄÏêÏ¸ĞÅÏ¢
+    // è·å–å„æ¡æµçš„è¯¦ç»†ä¿¡æ¯
     ret = avformat_find_stream_info(input.get(), nullptr);
     if (ret < 0) {
         return fail("Failed to find input stream info", ret);
     }
 
-    // Ñ°ÕÒ¡°×î¼ÑµÄÊÓÆµÁ÷¡±ºÍ¡°×î¼ÑµÄÒôÆµÁ÷¡±£¬²¢·µ»ØËüÃÇÔÚ input->streams Êı×éÖĞµÄË÷Òı
+    // å¯»æ‰¾â€œæœ€ä½³çš„è§†é¢‘æµâ€å’Œâ€œæœ€ä½³çš„éŸ³é¢‘æµâ€ï¼Œå¹¶è¿”å›å®ƒä»¬åœ¨ input->streams æ•°ç»„ä¸­çš„ç´¢å¼•
     const int videoIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     const int audioIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     if (videoIndex < 0) {
@@ -193,20 +193,20 @@ bool Transcoder::transcode(
     const AVStream* inputVideoStream = input->streams[videoIndex];
     const AVStream* inputAudioStream = input->streams[audioIndex];
 
-    // »ñÈ¡½âÂëÆ÷ÃèÊöĞÅÏ¢
+    // è·å–è§£ç å™¨æè¿°ä¿¡æ¯
     const AVCodec* videoDecoder = avcodec_find_decoder(inputVideoStream->codecpar->codec_id);
     const AVCodec* audioDecoder = avcodec_find_decoder(inputAudioStream->codecpar->codec_id);
     if (!videoDecoder || !audioDecoder) {
         return fail("Input decoder is not available");
     }
 
-    // »ñÈ¡½âÂëÆ÷ÉÏÏÂÎÄ
+    // è·å–è§£ç å™¨ä¸Šä¸‹æ–‡
     CodecPtr videoDecoderContext(avcodec_alloc_context3(videoDecoder));
     CodecPtr audioDecoderContext(avcodec_alloc_context3(audioDecoder));
     if (!videoDecoderContext || !audioDecoderContext) {
         return fail("Failed to allocate decoder context");
     }
-    // °ÑÊäÈëÊÓÆµÁ÷ÖĞµÄ±àÂë²ÎÊı£¬¸´ÖÆµ½Êµ¼ÊµÄÊÓÆµ½âÂëÆ÷ÉÏÏÂÎÄÖĞ
+    // æŠŠè¾“å…¥è§†é¢‘æµä¸­çš„ç¼–ç å‚æ•°ï¼Œå¤åˆ¶åˆ°å®é™…çš„è§†é¢‘è§£ç å™¨ä¸Šä¸‹æ–‡ä¸­
     ret = avcodec_parameters_to_context(videoDecoderContext.get(), inputVideoStream->codecpar);
     if (ret < 0) {
         return fail("Failed to configure video decoder", ret);
@@ -215,7 +215,7 @@ bool Transcoder::transcode(
     if (ret < 0) {
         return fail("Failed to configure audio decoder", ret);
     }
-    // Ê¹ÓÃÕÒµ½µÄÊÓÆµ½âÂëÆ÷³õÊ¼»¯²¢´ò¿ª½âÂëÆ÷ÉÏÏÂÎÄ
+    // ä½¿ç”¨æ‰¾åˆ°çš„è§†é¢‘è§£ç å™¨åˆå§‹åŒ–å¹¶æ‰“å¼€è§£ç å™¨ä¸Šä¸‹æ–‡
     ret = avcodec_open2(videoDecoderContext.get(), videoDecoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open video decoder", ret);
@@ -249,8 +249,8 @@ bool Transcoder::transcode(
     videoEncoderContext->bit_rate = options.videoBitrate;
     videoEncoderContext->gop_size = options.gopSize;
     videoEncoderContext->max_b_frames = 2;
-    if (videoEncoder->id == AV_CODEC_ID_H264) { // ÅĞ¶Ïµ±Ç°ÕÒµ½µÄ±àÂëÆ÷ÊÇ²»ÊÇ H.264 ±àÂëÆ÷
-        av_opt_set(videoEncoderContext->priv_data, "preset", "veryfast", 0);    // ±àÂë½Ï¿ì£¬Ñ¹ËõĞ§ÂÊ½ÏµÍ£¬CPUÕ¼ÓÃ½ÏµÍ£¬ÊÊºÏÊµÊ±×ªÂë
+    if (videoEncoder->id == AV_CODEC_ID_H264) { // åˆ¤æ–­å½“å‰æ‰¾åˆ°çš„ç¼–ç å™¨æ˜¯ä¸æ˜¯ H.264 ç¼–ç å™¨
+        av_opt_set(videoEncoderContext->priv_data, "preset", "veryfast", 0);    // ç¼–ç è¾ƒå¿«ï¼Œå‹ç¼©æ•ˆç‡è¾ƒä½ï¼ŒCPUå ç”¨è¾ƒä½ï¼Œé€‚åˆå®æ—¶è½¬ç 
         av_opt_set(videoEncoderContext->priv_data, "tune", "zerolatency", 0);
     }
 
@@ -259,8 +259,8 @@ bool Transcoder::transcode(
     audioEncoderContext->sample_fmt = chooseSampleFormat(audioEncoder);
     audioEncoderContext->bit_rate = options.audioBitrate;
     audioEncoderContext->time_base = AVRational{1, audioEncoderContext->sample_rate};
-    av_channel_layout_default(  // ¸øÒôÆµÉèÖÃÉùµÀ²¼¾Ö
-        &audioEncoderContext->ch_layout,    // ÉùµÀ²¼¾Ö±äÁ¿
+    av_channel_layout_default(  // ç»™éŸ³é¢‘è®¾ç½®å£°é“å¸ƒå±€
+        &audioEncoderContext->ch_layout,    // å£°é“å¸ƒå±€å˜é‡
         audioDecoderContext->ch_layout.nb_channels > 0 ? audioDecoderContext->ch_layout.nb_channels : 2
     );
     ret = avcodec_open2(videoEncoderContext.get(), videoEncoder, nullptr);
@@ -274,9 +274,9 @@ bool Transcoder::transcode(
 
     SwsPtr scaler(
         sws_getContext(
-            videoDecoderContext->width, videoDecoderContext->height, videoDecoderContext->pix_fmt,  // ½âÂëÆ÷Êä³öµÄÊÓÆµ¸ñÊ½£¬ÀıÈç£º568x320£¬YUV420P
-            videoEncoderContext->width, videoEncoderContext->height, videoEncoderContext->pix_fmt,  // ±àÂëÆ÷Êä³öµÄÊÓÆµ¸ñÊ½£¬ÀıÈç£º1280x720£¬YUV420P
-            SWS_BILINEAR, nullptr, nullptr, nullptr // ±íÊ¾Ëõ·ÅÊ±Ê¹ÓÃ¡°Ë«ÏßĞÔ²åÖµ¡±Ëã·¨
+            videoDecoderContext->width, videoDecoderContext->height, videoDecoderContext->pix_fmt,  // è§£ç å™¨è¾“å‡ºçš„è§†é¢‘æ ¼å¼ï¼Œä¾‹å¦‚ï¼š568x320ï¼ŒYUV420P
+            videoEncoderContext->width, videoEncoderContext->height, videoEncoderContext->pix_fmt,  // ç¼–ç å™¨è¾“å‡ºçš„è§†é¢‘æ ¼å¼ï¼Œä¾‹å¦‚ï¼š1280x720ï¼ŒYUV420P
+            SWS_BILINEAR, nullptr, nullptr, nullptr // è¡¨ç¤ºç¼©æ”¾æ—¶ä½¿ç”¨â€œåŒçº¿æ€§æ’å€¼â€ç®—æ³•
         )
     );
     if (!scaler) {
@@ -290,7 +290,7 @@ bool Transcoder::transcode(
     SwrContext* swrRaw = nullptr;
     ret = swr_alloc_set_opts2(
         &swrRaw,
-        &audioEncoderContext->ch_layout, audioEncoderContext->sample_fmt, audioEncoderContext->sample_rate, // ÉùµÀ²¼¾Ö£¬²ÉÑù¸ñÊ½£¬²ÉÑùÂÊ
+        &audioEncoderContext->ch_layout, audioEncoderContext->sample_fmt, audioEncoderContext->sample_rate, // å£°é“å¸ƒå±€ï¼Œé‡‡æ ·æ ¼å¼ï¼Œé‡‡æ ·ç‡
         &inputLayout, audioDecoderContext->sample_fmt, audioDecoderContext->sample_rate,
         0, nullptr
     );
@@ -303,20 +303,20 @@ bool Transcoder::transcode(
         return fail("Failed to initialize audio resampler", ret);
     }
 
-    AVFormatContext* outputRaw = nullptr;   // Êä³öÈİÆ÷
+    AVFormatContext* outputRaw = nullptr;   // è¾“å‡ºå®¹å™¨
     ret = avformat_alloc_output_context2(&outputRaw, nullptr, "mp4", outputUrl.c_str());
     if (ret < 0 || !outputRaw) {
         return fail("Failed to create MP4 output context", ret);
     }
     OutputPtr output(outputRaw);
-    AVStream* outputVideoStream = avformat_new_stream(output.get(), nullptr);   // Ö÷ÒªÊÇÓÃÀ´ÃèÊöÒ»ÌõÊÓÆµ¹ìµÀµÄĞÅÏ¢£¬ÕæÕıµÄÒ»Ö¡Ö¡ÊÓÆµÊı¾İ±£´æÔÚ AVPacket
-    AVStream* outputAudioStream = avformat_new_stream(output.get(), nullptr);   // Ö÷ÒªÊÇÓÃÀ´ÃèÊöÒ»ÌõÒôÆµ¹ìµÀµÄĞÅÏ¢
+    AVStream* outputVideoStream = avformat_new_stream(output.get(), nullptr);   // ä¸»è¦æ˜¯ç”¨æ¥æè¿°ä¸€æ¡è§†é¢‘è½¨é“çš„ä¿¡æ¯ï¼ŒçœŸæ­£çš„ä¸€å¸§å¸§è§†é¢‘æ•°æ®ä¿å­˜åœ¨ AVPacket
+    AVStream* outputAudioStream = avformat_new_stream(output.get(), nullptr);   // ä¸»è¦æ˜¯ç”¨æ¥æè¿°ä¸€æ¡éŸ³é¢‘è½¨é“çš„ä¿¡æ¯
     if (!outputVideoStream || !outputAudioStream) {
         return fail("Failed to create output streams");
     }
     outputVideoStream->time_base = videoEncoderContext->time_base;
     outputAudioStream->time_base = audioEncoderContext->time_base;
-    ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderContext.get());  // °Ñ±àÂëÆ÷ÉÏÏÂÎÄÖĞµÄ¾²Ì¬±àÂë²ÎÊı¸´ÖÆµ½Êä³öÁ÷µÄ codecpar ÖĞ
+    ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderContext.get());  // æŠŠç¼–ç å™¨ä¸Šä¸‹æ–‡ä¸­çš„é™æ€ç¼–ç å‚æ•°å¤åˆ¶åˆ°è¾“å‡ºæµçš„ codecpar ä¸­
     if (ret < 0) {
         return fail("Failed to copy video encoder parameters", ret);
     }
@@ -324,20 +324,20 @@ bool Transcoder::transcode(
     if (ret < 0) {
         return fail("Failed to copy audio encoder parameters", ret);
     }
-    // output->oformat->flags£¬Êä³öÈİÆ÷¸ñÊ½µÄ±êÖ¾¼¯ºÏ
-    // AVFMT_NOFILE£¬¸Ã¸ñÊ½²»ĞèÒª FFmpeg ÊÖ¶¯´ò¿ªÎÄ¼ş IO
+    // output->oformat->flagsï¼Œè¾“å‡ºå®¹å™¨æ ¼å¼çš„æ ‡å¿—é›†åˆ
+    // AVFMT_NOFILEï¼Œè¯¥æ ¼å¼ä¸éœ€è¦ FFmpeg æ‰‹åŠ¨æ‰“å¼€æ–‡ä»¶ IO
     if (!(output->oformat->flags & AVFMT_NOFILE)) { 
-        ret = avio_open(&output->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);   // avio_open() »á´ò¿ªÊä³öµØÖ·£¬²¢´´½¨Ò»¸ö AVIOContext£¬±£´æµ½ output->pb£¬Îª mp4 ÎÄ¼şµÄĞ´ÈëÍ¨µÀ
+        ret = avio_open(&output->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);   // avio_open() ä¼šæ‰“å¼€è¾“å‡ºåœ°å€ï¼Œå¹¶åˆ›å»ºä¸€ä¸ª AVIOContextï¼Œä¿å­˜åˆ° output->pbï¼Œä¸º mp4 æ–‡ä»¶çš„å†™å…¥é€šé“
         if (ret < 0) {
             return fail("Failed to open output: " + outputUrl, ret);
         }
     }
-    ret = avformat_write_header(output.get(), nullptr); // ÏòÊä³öÎÄ¼şĞ´Èë¡°ÈİÆ÷ÎÄ¼şÍ·¡±
+    ret = avformat_write_header(output.get(), nullptr); // å‘è¾“å‡ºæ–‡ä»¶å†™å…¥â€œå®¹å™¨æ–‡ä»¶å¤´â€
     if (ret < 0) {
         return fail("Failed to write MP4 header", ret);
     }
 
-    // audioEncoderContext->frame_size ÎªÃ¿¸öÉùµÀÒ»Ö¡ÖĞÓ¦ÓĞµÄ²ÉÑùµãÊı
+    // audioEncoderContext->frame_size ä¸ºæ¯ä¸ªå£°é“ä¸€å¸§ä¸­åº”æœ‰çš„é‡‡æ ·ç‚¹æ•°
     const int audioFrameSize = audioEncoderContext->frame_size > 0 ? audioEncoderContext->frame_size : 1024;
     FifoPtr audioFifo(
         av_audio_fifo_alloc(audioEncoderContext->sample_fmt, audioEncoderContext->ch_layout.nb_channels, 1)
@@ -355,7 +355,7 @@ bool Transcoder::transcode(
     int64_t videoFrames = 0;
     int64_t audioFrames = 0;
 
-    auto writeEncodedPackets = [&](AVCodecContext* encoder, AVStream* stream) -> bool {
+    auto writeEncodedPackets = [&ret, &packet, &output](AVCodecContext* encoder, AVStream* stream) -> bool {
         while (true) {
             ret = avcodec_receive_packet(encoder, packet.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
@@ -385,10 +385,18 @@ bool Transcoder::transcode(
         if ((ret = av_frame_get_buffer(converted.get(), 32)) < 0) {
             return false;
         }
-        if ((ret = sws_scale(scaler.get(), source->data, source->linesize, 0, source->height,
-            converted->data, converted->linesize)) <= 0) {
+        ret = sws_scale(
+            scaler.get(),       // SwsContext*
+            source->data,       // è¾“å…¥å›¾åƒå„ä¸ª plane çš„æ•°æ®çš„æŒ‡é’ˆæ•°ç»„
+            source->linesize,   // æ¯ä¸ª plane æ¯ä¸€è¡Œå ç”¨çš„å­—èŠ‚æ•°
+            0,                  // ä»è¾“å…¥å›¾åƒçš„ç¬¬ 0 è¡Œå¼€å§‹å¤„ç†
+            source->height,     // æœ¬æ¬¡è¦å¤„ç†çš„è¾“å…¥å›¾åƒé«˜åº¦ï¼Œä¹Ÿå°±æ˜¯è¾“å…¥åˆ‡ç‰‡åŒ…å«å¤šå°‘è¡Œ
+            converted->data,    // è¾“å‡ºå›¾åƒå„ä¸ª plane çš„æ•°æ®æŒ‡é’ˆæ•°ç»„
+            converted->linesize
+        )
+        if ((ret <= 0) {
             return false;
-        }
+        }   
         int64_t sourcePts = source->best_effort_timestamp;
         if (sourcePts == AV_NOPTS_VALUE) {
             sourcePts = videoFrames;
@@ -400,30 +408,45 @@ bool Transcoder::transcode(
     };
 
     auto encodeAudioFrames = [&](bool flush) -> bool {
-        while (av_audio_fifo_size(audioFifo.get()) >= audioFrameSize || (flush && av_audio_fifo_size(audioFifo.get()) > 0)) {
+        while (
+            av_audio_fifo_size(audioFifo.get()) >= audioFrameSize   // éŸ³é¢‘ FIFO ä¸­å½“å‰ç¼“å­˜çš„é‡‡æ ·ç‚¹æ•°é‡ï¼Œæ˜¯å¦å·²ç»è¾¾åˆ°ç¼–ç å™¨ä¸€å¸§æ‰€éœ€è¦çš„é‡‡æ ·ç‚¹æ•°é‡
+            || (flush && av_audio_fifo_size(audioFifo.get()) > 0)   // å¦‚æœç°åœ¨å¤„äºâ€œæ”¶å°¾/æ¸…ç©ºç¼“å†²åŒºâ€é˜¶æ®µï¼Œå¹¶ä¸” FIFO é‡Œè¿˜æ®‹ç•™éŸ³é¢‘é‡‡æ ·ï¼Œå°±ç»§ç»­å¤„ç†å®ƒ
+        ) {
             const int available = av_audio_fifo_size(audioFifo.get());
             const int samples = flush ? std::min(audioFrameSize, available) : audioFrameSize;
             FramePtr audioFrame(av_frame_alloc());
             if (!audioFrame) {
                 return false;
-            }
-            audioFrame->nb_samples = audioFrameSize;
-            audioFrame->format = audioEncoderContext->sample_fmt;
-            audioFrame->sample_rate = audioEncoderContext->sample_rate;
-            ret = av_channel_layout_copy(&audioFrame->ch_layout, &audioEncoderContext->ch_layout);
+            } 
+            // é‡‡æ ·ç‚¹/é‡‡æ ·ç‡ = éŸ³é¢‘å¸§æŒç»­æ—¶é—´
+            audioFrame->nb_samples = audioFrameSize;    // éŸ³é¢‘å¸§ä¸­æ¯ä¸ªå£°é“çš„é‡‡æ ·ç‚¹
+            audioFrame->format = audioEncoderContext->sample_fmt;   
+            audioFrame->sample_rate = audioEncoderContext->sample_rate; // é‡‡æ ·ç‡
+            ret = av_channel_layout_copy(&audioFrame->ch_layout, &audioEncoderContext->ch_layout);  // å¤åˆ¶é€šé“å¸ƒå±€
             if (ret < 0 || (ret = av_frame_get_buffer(audioFrame.get(), 0)) < 0) {
                 return false;
             }
-            ret = av_audio_fifo_read(audioFifo.get(), reinterpret_cast<void**>(audioFrame->data), samples);
+            // ä»éŸ³é¢‘ FIFO ä¸­å–å‡º samples ä¸ªé‡‡æ ·ï¼Œå¤åˆ¶åˆ° audioFrame çš„éŸ³é¢‘ç¼“å†²åŒºä¸­ï¼Œå¹¶ä» FIFO ä¸­ç§»é™¤è¿™äº›æ•°æ®
+            ret = av_audio_fifo_read(
+                audioFifo.get(),    // éŸ³é¢‘ FIFO ç¼“å†²åŒº
+                reinterpret_cast<void**>(audioFrame->data), // æŠŠè¯»å–å‡ºæ¥çš„éŸ³é¢‘é‡‡æ ·æ”¾åˆ°è¿™é‡Œ
+                samples             // è¡¨ç¤ºæœ¬æ¬¡è¯»å–å¤šå°‘ä¸ªé‡‡æ ·
+            );
             if (ret != samples) {
                 return false;
             }
+            // ç»™â€œæœ€åä¸€å¸§ä¸å®Œæ•´çš„éŸ³é¢‘â€è¡¥é™éŸ³
             if (samples < audioFrameSize) {
-                av_samples_set_silence(audioFrame->data, samples, audioFrameSize - samples,
-                    audioEncoderContext->ch_layout.nb_channels, audioEncoderContext->sample_fmt);
+                av_samples_set_silence( 
+                    audioFrame->data, 
+                    samples,    // èµ·å§‹åç§»é‡ï¼Œä¹Ÿå°±æ˜¯ä»ç¬¬å‡ ä¸ªé‡‡æ ·å¼€å§‹è¡¥é™éŸ³
+                    audioFrameSize - samples,   // è¦è¡¥å¤šå°‘ä¸ªé‡‡æ ·
+                    audioEncoderContext->ch_layout.nb_channels, 
+                    audioEncoderContext->sample_fmt
+                );
             }
             audioFrame->pts = nextAudioPts;
-            nextAudioPts += audioFrameSize;
+            nextAudioPts += audioFrameSize; // ä¸‹ä¸€å¸§éŸ³é¢‘çš„ PTSï¼Œè¦åœ¨å½“å‰å¸§ PTS çš„åŸºç¡€ä¸Šå‘åç§»åŠ¨â€œè¿™ä¸€å¸§åŒ…å«çš„é‡‡æ ·æ•°â€
             ++audioFrames;
             ret = avcodec_send_frame(audioEncoderContext.get(), audioFrame.get());
             if (ret < 0 || !writeEncodedPackets(audioEncoderContext.get(), outputAudioStream)) {
