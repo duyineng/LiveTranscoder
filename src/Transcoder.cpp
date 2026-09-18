@@ -27,7 +27,7 @@ std::string errorString(int errnum) {
     return std::string(buffer.data());
 }
 
-struct FormatInputDeleter {
+struct InputFormatContextDeleter {
     void operator()(AVFormatContext* context) const {
         if (context) {
             avformat_close_input(&context);
@@ -35,7 +35,7 @@ struct FormatInputDeleter {
     }
 };
 
-struct FormatOutputDeleter {
+struct OutputFormatContextDeleter {
     void operator()(AVFormatContext* context) const {
         if (context) {
             if (context->pb) {
@@ -46,7 +46,7 @@ struct FormatOutputDeleter {
     }
 };
 
-struct CodecDeleter {
+struct CodecContextDeleter {
     void operator()(AVCodecContext* context) const { 
         avcodec_free_context(&context); 
     }
@@ -60,11 +60,11 @@ struct PacketDeleter {
     void operator()(AVPacket* packet) const { av_packet_free(&packet); }
 };
 
-struct SwsDeleter {
+struct SwsContextDeleter {
     void operator()(SwsContext* context) const { sws_freeContext(context); }
 };
 
-struct SwrDeleter {
+struct SwrContextDeleter {
     void operator()(SwrContext* context) const { swr_free(&context); }
 };
 
@@ -72,23 +72,30 @@ struct AudioFifoDeleter {
     void operator()(AVAudioFifo* fifo) const { av_audio_fifo_free(fifo); }
 };
 
-using InputPtr = std::unique_ptr<AVFormatContext, FormatInputDeleter>;
-using OutputPtr = std::unique_ptr<AVFormatContext, FormatOutputDeleter>;
-using CodecPtr = std::unique_ptr<AVCodecContext, CodecDeleter>;
+using InputFormatContextPtr = std::unique_ptr<AVFormatContext, InputFormatContextDeleter>;
+using OutputFormatContextPtr = std::unique_ptr<AVFormatContext, OutputFormatContextDeleter>;
+using CodecContextPtr = std::unique_ptr<AVCodecContext, CodecContextDeleter>;
 using FramePtr = std::unique_ptr<AVFrame, FrameDeleter>;
 using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
-using SwsPtr = std::unique_ptr<SwsContext, SwsDeleter>;
-using SwrPtr = std::unique_ptr<SwrContext, SwrDeleter>;
-using FifoPtr = std::unique_ptr<AVAudioFifo, AudioFifoDeleter>;
+using SwsContextPtr = std::unique_ptr<SwsContext, SwsContextDeleter>;
+using SwrContextPtr = std::unique_ptr<SwrContext, SwrContextDeleter>;
+using AudioFifoPtr = std::unique_ptr<AVAudioFifo, AudioFifoDeleter>;
+
+int getCodecConfig(const AVCodec* codec, AVCodecConfig config, const void** outConfigs) {
+    *outConfigs = nullptr;
+    return avcodec_get_supported_config(nullptr, codec, config, 0, outConfigs, nullptr);
+}
 
 int chooseSampleRate(const AVCodec* codec, int requested, int fallback) {
-    if (!codec->supported_samplerates) {
+    const void* configs = nullptr;
+    if (getCodecConfig(codec, AV_CODEC_CONFIG_SAMPLE_RATE, &configs) < 0 || !configs) {
         return requested > 0 ? requested : fallback;
     }
 
-    int best = codec->supported_samplerates[0];
+    const int* rates = static_cast<const int*>(configs);
+    int best = rates[0];
     int bestDistance = std::abs(best - requested);
-    for (const int* rate = codec->supported_samplerates; *rate; ++rate) {
+    for (const int* rate = rates; *rate; ++rate) {
         const int distance = std::abs(*rate - requested);
         if (distance < bestDistance) {
             best = *rate;
@@ -99,15 +106,36 @@ int chooseSampleRate(const AVCodec* codec, int requested, int fallback) {
 }
 
 AVSampleFormat chooseSampleFormat(const AVCodec* codec) {
-    if (!codec->sample_fmts) {
+    const void* configs = nullptr;
+    if (getCodecConfig(codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, &configs) < 0 || !configs) {
         return AV_SAMPLE_FMT_FLTP;
     }
-    for (const AVSampleFormat* format = codec->sample_fmts; *format != AV_SAMPLE_FMT_NONE; ++format) {
+
+    const auto* formats = static_cast<const AVSampleFormat*>(configs);
+    for (const AVSampleFormat* format = formats; *format != AV_SAMPLE_FMT_NONE; ++format) {
         if (*format == AV_SAMPLE_FMT_FLTP) {
             return *format;
         }
     }
-    return codec->sample_fmts[0];
+    return formats[0];
+}
+
+bool codecAcceptsYuv420p(const AVCodec* codec) {
+    const void* configs = nullptr;
+    if (getCodecConfig(codec, AV_CODEC_CONFIG_PIX_FORMAT, &configs) < 0) {
+        return false;
+    }
+    if (!configs) {
+        return true;
+    }
+
+    const auto* formats = static_cast<const AVPixelFormat*>(configs);
+    for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+        if (*format == AV_PIX_FMT_YUV420P) {
+            return true;
+        }
+    }
+    return false;
 }
 
 const AVCodec* findSoftwareH264Encoder() {
@@ -123,14 +151,10 @@ const AVCodec* findSoftwareH264Encoder() {
     void* opaque = nullptr;
     const AVCodec* codec = nullptr;
     while ((codec = av_codec_iterate(&opaque)) != nullptr) {
-        if (!av_codec_is_encoder(codec) || codec->id != AV_CODEC_ID_H264 || !codec->pix_fmts) {
+        if (!av_codec_is_encoder(codec) || codec->id != AV_CODEC_ID_H264) {
             continue;
         }
-        bool acceptsYuv420p = false;
-        for (const AVPixelFormat* format = codec->pix_fmts; *format != AV_PIX_FMT_NONE; ++format) {
-            acceptsYuv420p = acceptsYuv420p || *format == AV_PIX_FMT_YUV420P;
-        }
-        if (acceptsYuv420p) {
+        if (codecAcceptsYuv420p(codec)) {
             return codec;
         }
     }
@@ -164,28 +188,28 @@ bool Transcoder::transcode(
         return fail("Output dimensions must be positive");  // 输出尺寸必须是正数
     }
 
-    AVFormatContext* inputRaw = nullptr;    // 容器格式上下文，例如 MP4、FLV
-    int ret = avformat_open_input(&inputRaw, inputUrl.c_str(), nullptr, nullptr);   // 分配并初始化 inputRaw
+    AVFormatContext* inputCtxRaw = nullptr;    // 容器格式上下文，例如 MP4、FLV
+    int ret = avformat_open_input(&inputCtxRaw, inputUrl.c_str(), nullptr, nullptr);   // 分配并初始化 inputCtxRaw
     if (ret < 0) {
         return fail("Failed to open input: " + inputUrl, ret);
     }
-    InputPtr input(inputRaw);
-    inputRaw = nullptr;
+    InputFormatContextPtr inputCtx(inputCtxRaw);
+    inputCtxRaw = nullptr;
 
-    ret = avformat_find_stream_info(input.get(), nullptr);  // 继续探测，在上下文中补充音视频流信息
+    ret = avformat_find_stream_info(inputCtx.get(), nullptr);  // 直接在上下文 inputCtx 中补充更多信息，例如音视频流信息
     if (ret < 0) {
         return fail("Failed to find input stream info", ret);
     }
 
-    // 最普通的 MP4 可能只有：[0] AAC 音频，[1] H.264 视频，此时自然分别选中唯一的音频流和视频流
+    // 最普通的 MP4 可能只有：streams[0] H.264 视频，streams[1] AAC 音频
     // 但实际媒体也可能有：
-    // 视频流 0：1080p 主画面
-    // 视频流 1：360p 预览画面
-    // 音频流 0：中文
-    // 音频流 1：英文
-    // 音频流 2：导演评论音轨
-    const int videoIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);    // 寻找“最佳的视频流”，并返回它们在 input->streams 数组中的索引
-    const int audioIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);    // 寻找“最佳的音频流”，并返回它们在 input->streams 数组中的索引
+    // streams[0]  视频  1080p 主画面
+    // streams[1]  音频  中文
+    // streams[2]  视频  360p 预览
+    // streams[3]  音频  英文
+    // streams[4]  字幕
+    const int videoIndex = av_find_best_stream(inputCtx.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);    // 寻找“最佳的视频流”，并返回它们在 inputCtx->streams 数组中的索引
+    const int audioIndex = av_find_best_stream(inputCtx.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);    // 寻找“最佳的音频流”，并返回它们在 inputCtx->streams 数组中的索引
     if (videoIndex < 0) {
         return fail("Input has no video stream", videoIndex);
     }
@@ -193,40 +217,39 @@ bool Transcoder::transcode(
         return fail("Input has no audio stream", audioIndex);
     }
 
-    // 获取选中的视频流和音频流对象，在媒体容器中，“流”又通常可理解为“轨道”
-    // AVStream 主要保存流的描述信息，例如媒体类型、编码格式、时间基、视频分辨率或音频采样率等
-    // 具体的压缩数据由 AVPacket 逐个承载
-    const AVStream* inputVideoStream = input->streams[videoIndex];
-    const AVStream* inputAudioStream = input->streams[audioIndex];
+    // AVStream 主要保存流的描述信息，例如媒体类型（视频 / 音频）、编码格式（H.264、AAC）、时间基 time_base（1 个 PTS 单位有多长，如1/30 秒）、视频分辨率或音频采样率等
+    // 在媒体容器中，“流”又通常可理解为“轨道”
+    const AVStream* inputVideoStream = inputCtx->streams[videoIndex];
+    const AVStream* inputAudioStream = inputCtx->streams[audioIndex];
 
-    // 获取解码器描述信息对象，不是已经运行的解码器实例
-    const AVCodec* videoDecoder = avcodec_find_decoder(inputVideoStream->codecpar->codec_id);   // codec_id 为编码格式 id，常见如 AV_CODEC_ID_H264，AV_CODEC_ID_HEVC
-    const AVCodec* audioDecoder = avcodec_find_decoder(inputAudioStream->codecpar->codec_id);
+    // AVCodec 主要保存解码器的描述信息
+    const AVCodec* videoDecoder = avcodec_find_decoder(inputVideoStream->codecpar->codec_id);   // codec_id 为编码格式 id，常见如 AV_CODEC_ID_H264，AV_CODEC_ID_HEVC（H.265）
+    const AVCodec* audioDecoder = avcodec_find_decoder(inputAudioStream->codecpar->codec_id);   // codec_id 为编码格式 id，常见如 AV_CODEC_ID_AAC
     if (!videoDecoder || !audioDecoder) {
         return fail("Input decoder is not available");
     }
 
     // 创建空的解码器上下文，并关联 AVCodec* 所代表的解码器类型
-    CodecPtr videoDecoderContext(avcodec_alloc_context3(videoDecoder));
-    CodecPtr audioDecoderContext(avcodec_alloc_context3(audioDecoder));
-    if (!videoDecoderContext || !audioDecoderContext) {
+    CodecContextPtr videoDecoderCtx(avcodec_alloc_context3(videoDecoder));
+    CodecContextPtr audioDecoderCtx(avcodec_alloc_context3(audioDecoder));
+    if (!videoDecoderCtx || !audioDecoderCtx) {
         return fail("Failed to allocate decoder context");
     }
     
-    ret = avcodec_parameters_to_context(videoDecoderContext.get(), inputVideoStream->codecpar); // 把输入视频流中的编码参数，复制到实际的视频解码器上下文中
+    ret = avcodec_parameters_to_context(videoDecoderCtx.get(), inputVideoStream->codecpar); // 把输入视频流中的编码参数，复制到实际的视频解码器上下文中
     if (ret < 0) {
         return fail("Failed to configure video decoder", ret);
     }
-    ret = avcodec_parameters_to_context(audioDecoderContext.get(), inputAudioStream->codecpar);
+    ret = avcodec_parameters_to_context(audioDecoderCtx.get(), inputAudioStream->codecpar);
     if (ret < 0) {
         return fail("Failed to configure audio decoder", ret);
     }
     // 真正的初始化并打开解码器上下文
-    ret = avcodec_open2(videoDecoderContext.get(), videoDecoder, nullptr);
+    ret = avcodec_open2(videoDecoderCtx.get(), videoDecoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open video decoder", ret);
     }
-    ret = avcodec_open2(audioDecoderContext.get(), audioDecoder, nullptr);
+    ret = avcodec_open2(audioDecoderCtx.get(), audioDecoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open audio decoder", ret);
     }
@@ -239,9 +262,9 @@ bool Transcoder::transcode(
     }
 
     // 创建空的编码器上下文，并关联 AVCodec* 所代表的编码器类型
-    CodecPtr videoEncoderContext(avcodec_alloc_context3(videoEncoder));
-    CodecPtr audioEncoderContext(avcodec_alloc_context3(audioEncoder));
-    if (!videoEncoderContext || !audioEncoderContext) {
+    CodecContextPtr videoEncoderCtx(avcodec_alloc_context3(videoEncoder));
+    CodecContextPtr audioEncoderCtx(avcodec_alloc_context3(audioEncoder));
+    if (!videoEncoderCtx || !audioEncoderCtx) {
         return fail("Failed to allocate encoder context");
     }
 
@@ -249,106 +272,106 @@ bool Transcoder::transcode(
     if (frameRate.num <= 0 || frameRate.den <= 0) {
         frameRate = AVRational{30, 1};
     }
-    videoEncoderContext->width = options.width;
-    videoEncoderContext->height = options.height;
-    videoEncoderContext->pix_fmt = AV_PIX_FMT_YUV420P;      // 输入视频帧的像素格式
-    videoEncoderContext->time_base = av_inv_q(frameRate);   // 编码器时间戳的单位是 1 / 30 秒
-    videoEncoderContext->framerate = frameRate;             // 编码器的目标帧率
-    videoEncoderContext->bit_rate = options.videoBitrate;   // 编码器的目标比特率，如 2.5 Mbps，
-    videoEncoderContext->gop_size = options.gopSize;        // Group Of Pictures，表示一组连续视频帧，gop_size，表示两个关键帧（I 帧）之间最多间隔多少帧
-    videoEncoderContext->max_b_frames = 2;
+    videoEncoderCtx->width = options.width;
+    videoEncoderCtx->height = options.height;
+    videoEncoderCtx->pix_fmt = AV_PIX_FMT_YUV420P;      // 输入视频帧的像素格式
+    videoEncoderCtx->time_base = av_inv_q(frameRate);   // 编码器时间戳的单位是 1 / 30 秒
+    videoEncoderCtx->framerate = frameRate;             // 编码器的目标帧率
+    videoEncoderCtx->bit_rate = options.videoBitrate;   // 编码器的目标比特率，如 2.5 Mbps，
+    videoEncoderCtx->gop_size = options.gopSize;        // Group Of Pictures，表示一组连续视频帧，gop_size，表示两个关键帧（I 帧）之间最多间隔多少帧
+    videoEncoderCtx->max_b_frames = 2;
     if (videoEncoder->id == AV_CODEC_ID_H264) { // 判断当前找到的编码器是不是 H.264 编码器
-        av_opt_set(videoEncoderContext->priv_data, "preset", "veryfast", 0);    // 编码较快，压缩效率较低，CPU占用较低，适合实时转码
-        av_opt_set(videoEncoderContext->priv_data, "tune", "zerolatency", 0);
+        av_opt_set(videoEncoderCtx->priv_data, "preset", "veryfast", 0);    // 编码较快，压缩效率较低，CPU占用较低，适合实时转码
+        av_opt_set(videoEncoderCtx->priv_data, "tune", "zerolatency", 0);
     }
 
-    const int requestedRate = options.audioSampleRate > 0 ? options.audioSampleRate : audioDecoderContext->sample_rate;
-    audioEncoderContext->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000);
-    audioEncoderContext->sample_fmt = chooseSampleFormat(audioEncoder);
-    audioEncoderContext->bit_rate = options.audioBitrate;
-    audioEncoderContext->time_base = AVRational{1, audioEncoderContext->sample_rate};
+    const int requestedRate = options.audioSampleRate > 0 ? options.audioSampleRate : audioDecoderCtx->sample_rate;
+    audioEncoderCtx->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000);
+    audioEncoderCtx->sample_fmt = chooseSampleFormat(audioEncoder);
+    audioEncoderCtx->bit_rate = options.audioBitrate;
+    audioEncoderCtx->time_base = AVRational{1, audioEncoderCtx->sample_rate};
     av_channel_layout_default(  // 给音频设置声道布局
-        &audioEncoderContext->ch_layout,    // 声道布局变量
-        audioDecoderContext->ch_layout.nb_channels > 0 ? audioDecoderContext->ch_layout.nb_channels : 2
+        &audioEncoderCtx->ch_layout,    // 声道布局变量
+        audioDecoderCtx->ch_layout.nb_channels > 0 ? audioDecoderCtx->ch_layout.nb_channels : 2
     );
-    ret = avcodec_open2(videoEncoderContext.get(), videoEncoder, nullptr);
+    ret = avcodec_open2(videoEncoderCtx.get(), videoEncoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open H.264 encoder", ret);
     }
-    ret = avcodec_open2(audioEncoderContext.get(), audioEncoder, nullptr);
+    ret = avcodec_open2(audioEncoderCtx.get(), audioEncoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open AAC encoder", ret);
     }
 
-    SwsPtr scaler(
+    SwsContextPtr scalerCtx(
         sws_getContext(
-            videoDecoderContext->width, videoDecoderContext->height, videoDecoderContext->pix_fmt,  // 解码器输出的视频格式，例如：568x320，YUV420P
-            videoEncoderContext->width, videoEncoderContext->height, videoEncoderContext->pix_fmt,  // 编码器输出的视频格式，例如：1280x720，YUV420P
+            videoDecoderCtx->width, videoDecoderCtx->height, videoDecoderCtx->pix_fmt,  // 解码器输出的视频格式，例如：568x320，YUV420P
+            videoEncoderCtx->width, videoEncoderCtx->height, videoEncoderCtx->pix_fmt,  // 编码器输出的视频格式，例如：1280x720，YUV420P
             SWS_BILINEAR, nullptr, nullptr, nullptr // 表示缩放时使用“双线性插值”算法
         )
     );
-    if (!scaler) {
+    if (!scalerCtx) {
         return fail("Failed to create video scaler");
     }
 
-    AVChannelLayout inputLayout = audioDecoderContext->ch_layout;
+    AVChannelLayout inputLayout = audioDecoderCtx->ch_layout;
     if (inputLayout.nb_channels <= 0) {
         av_channel_layout_default(&inputLayout, 2);
     }
-    SwrContext* swrRaw = nullptr;
+    SwrContext* swrCtxRaw = nullptr;
     ret = swr_alloc_set_opts2(
-        &swrRaw,
-        &audioEncoderContext->ch_layout, audioEncoderContext->sample_fmt, audioEncoderContext->sample_rate, // 声道布局，采样格式，采样率
-        &inputLayout, audioDecoderContext->sample_fmt, audioDecoderContext->sample_rate,
+        &swrCtxRaw,
+        &audioEncoderCtx->ch_layout, audioEncoderCtx->sample_fmt, audioEncoderCtx->sample_rate, // 声道布局，采样格式，采样率
+        &inputLayout, audioDecoderCtx->sample_fmt, audioDecoderCtx->sample_rate,
         0, nullptr
     );
-    SwrPtr resampler(swrRaw);
-    if (ret < 0 || !resampler) {
+    SwrContextPtr resamplerCtx(swrCtxRaw);
+    if (ret < 0 || !resamplerCtx) {
         return fail("Failed to create audio resampler", ret);
     }
-    ret = swr_init(resampler.get());
+    ret = swr_init(resamplerCtx.get());
     if (ret < 0) {
         return fail("Failed to initialize audio resampler", ret);
     }
 
-    AVFormatContext* outputRaw = nullptr;   // 输出容器
-    ret = avformat_alloc_output_context2(&outputRaw, nullptr, "mp4", outputUrl.c_str());
-    if (ret < 0 || !outputRaw) {
+    AVFormatContext* outputCtxRaw = nullptr;   // 输出容器
+    ret = avformat_alloc_output_context2(&outputCtxRaw, nullptr, "mp4", outputUrl.c_str());
+    if (ret < 0 || !outputCtxRaw) {
         return fail("Failed to create MP4 output context", ret);
     }
-    OutputPtr output(outputRaw);
-    AVStream* outputVideoStream = avformat_new_stream(output.get(), nullptr);   // 主要是用来描述一条视频轨道的信息，真正的一帧帧视频数据保存在 AVPacket
-    AVStream* outputAudioStream = avformat_new_stream(output.get(), nullptr);   // 主要是用来描述一条音频轨道的信息
+    OutputFormatContextPtr outputCtx(outputCtxRaw);
+    AVStream* outputVideoStream = avformat_new_stream(outputCtx.get(), nullptr);   // 主要是用来描述一条视频轨道的信息，真正的一帧帧视频数据保存在 AVPacket
+    AVStream* outputAudioStream = avformat_new_stream(outputCtx.get(), nullptr);   // 主要是用来描述一条音频轨道的信息
     if (!outputVideoStream || !outputAudioStream) {
         return fail("Failed to create output streams");
     }
-    outputVideoStream->time_base = videoEncoderContext->time_base;
-    outputAudioStream->time_base = audioEncoderContext->time_base;
-    ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderContext.get());  // 把编码器上下文中的静态编码参数复制到输出流的 codecpar 中
+    outputVideoStream->time_base = videoEncoderCtx->time_base;
+    outputAudioStream->time_base = audioEncoderCtx->time_base;
+    ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderCtx.get());  // 把编码器上下文中的静态编码参数复制到输出流的 codecpar 中
     if (ret < 0) {
         return fail("Failed to copy video encoder parameters", ret);
     }
-    ret = avcodec_parameters_from_context(outputAudioStream->codecpar, audioEncoderContext.get());
+    ret = avcodec_parameters_from_context(outputAudioStream->codecpar, audioEncoderCtx.get());
     if (ret < 0) {
         return fail("Failed to copy audio encoder parameters", ret);
     }
-    // output->oformat->flags，输出容器格式的标志集合
+    // outputCtx->oformat->flags，输出容器格式的标志集合
     // AVFMT_NOFILE，该格式不需要 FFmpeg 手动打开文件 IO
-    if (!(output->oformat->flags & AVFMT_NOFILE)) { 
-        ret = avio_open(&output->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);   // avio_open() 会打开输出地址，并创建一个 AVIOContext，保存到 output->pb，为 mp4 文件的写入通道
+    if (!(outputCtx->oformat->flags & AVFMT_NOFILE)) { 
+        ret = avio_open(&outputCtx->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);   // avio_open() 会打开输出地址，并创建一个 AVIOContext，保存到 outputCtx->pb，为 mp4 文件的写入通道
         if (ret < 0) {
             return fail("Failed to open output: " + outputUrl, ret);
         }
     }
-    ret = avformat_write_header(output.get(), nullptr); // 向输出文件写入“容器文件头”
+    ret = avformat_write_header(outputCtx.get(), nullptr); // 向输出文件写入“容器文件头”
     if (ret < 0) {
         return fail("Failed to write MP4 header", ret);
     }
 
-    // audioEncoderContext->frame_size 为每个声道一帧中应有的采样点数
-    const int audioFrameSize = audioEncoderContext->frame_size > 0 ? audioEncoderContext->frame_size : 1024;
-    FifoPtr audioFifo(
-        av_audio_fifo_alloc(audioEncoderContext->sample_fmt, audioEncoderContext->ch_layout.nb_channels, 1)
+    // audioEncoderCtx->frame_size 为每个声道一帧中应有的采样点数
+    const int audioFrameSize = audioEncoderCtx->frame_size > 0 ? audioEncoderCtx->frame_size : 1024;
+    AudioFifoPtr audioFifo(
+        av_audio_fifo_alloc(audioEncoderCtx->sample_fmt, audioEncoderCtx->ch_layout.nb_channels, 1)
     );
     if (!audioFifo) {
         return fail("Failed to allocate audio FIFO");
@@ -363,7 +386,7 @@ bool Transcoder::transcode(
     int64_t videoFrames = 0;
     int64_t audioFrames = 0;
 
-    auto writeEncodedPackets = [&ret, &packet, &output](AVCodecContext* encoder, AVStream* stream) -> bool {
+    auto writeEncodedPackets = [&ret, &packet, &outputCtx](AVCodecContext* encoder, AVStream* stream) -> bool {
         while (true) {
             ret = avcodec_receive_packet(encoder, packet.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
@@ -374,7 +397,7 @@ bool Transcoder::transcode(
             }
             av_packet_rescale_ts(packet.get(), encoder->time_base, stream->time_base);
             packet->stream_index = stream->index;
-            ret = av_interleaved_write_frame(output.get(), packet.get());
+            ret = av_interleaved_write_frame(outputCtx.get(), packet.get());
             av_packet_unref(packet.get());
             if (ret < 0) {
                 return false;
@@ -387,14 +410,14 @@ bool Transcoder::transcode(
         if (!converted) {
             return false;
         }
-        converted->format = videoEncoderContext->pix_fmt;
-        converted->width = videoEncoderContext->width;
-        converted->height = videoEncoderContext->height;
+        converted->format = videoEncoderCtx->pix_fmt;
+        converted->width = videoEncoderCtx->width;
+        converted->height = videoEncoderCtx->height;
         if ((ret = av_frame_get_buffer(converted.get(), 32)) < 0) {
             return false;
         }
         ret = sws_scale(
-            scaler.get(),       // SwsContext*
+            scalerCtx.get(),       // SwsContext*
             source->data,       // 输入图像各个 plane 的数据的指针数组
             source->linesize,   // 每个 plane 每一行占用的字节数
             0,                  // 从输入图像的第 0 行开始处理
@@ -409,10 +432,10 @@ bool Transcoder::transcode(
         if (sourcePts == AV_NOPTS_VALUE) {
             sourcePts = videoFrames;
         }
-        converted->pts = av_rescale_q(sourcePts, inputVideoStream->time_base, videoEncoderContext->time_base);
+        converted->pts = av_rescale_q(sourcePts, inputVideoStream->time_base, videoEncoderCtx->time_base);
         ++videoFrames;
-        ret = avcodec_send_frame(videoEncoderContext.get(), converted.get());
-        return ret >= 0 && writeEncodedPackets(videoEncoderContext.get(), outputVideoStream);
+        ret = avcodec_send_frame(videoEncoderCtx.get(), converted.get());
+        return ret >= 0 && writeEncodedPackets(videoEncoderCtx.get(), outputVideoStream);
     };
 
     auto encodeAudioFrames = [&](bool flush) -> bool {
@@ -428,9 +451,9 @@ bool Transcoder::transcode(
             } 
             // 采样点/采样率 = 音频帧持续时间
             audioFrame->nb_samples = audioFrameSize;    // 音频帧中每个声道的采样点
-            audioFrame->format = audioEncoderContext->sample_fmt;   
-            audioFrame->sample_rate = audioEncoderContext->sample_rate; // 采样率
-            ret = av_channel_layout_copy(&audioFrame->ch_layout, &audioEncoderContext->ch_layout);  // 复制通道布局
+            audioFrame->format = audioEncoderCtx->sample_fmt;   
+            audioFrame->sample_rate = audioEncoderCtx->sample_rate; // 采样率
+            ret = av_channel_layout_copy(&audioFrame->ch_layout, &audioEncoderCtx->ch_layout);  // 复制通道布局
             if (ret < 0 || (ret = av_frame_get_buffer(audioFrame.get(), 0)) < 0) {
                 return false;
             }
@@ -449,15 +472,15 @@ bool Transcoder::transcode(
                     audioFrame->data, 
                     samples,    // 起始偏移量，也就是从第几个采样开始补静音
                     audioFrameSize - samples,   // 要补多少个采样
-                    audioEncoderContext->ch_layout.nb_channels, 
-                    audioEncoderContext->sample_fmt
+                    audioEncoderCtx->ch_layout.nb_channels, 
+                    audioEncoderCtx->sample_fmt
                 );
             }
             audioFrame->pts = nextAudioPts;
             nextAudioPts += audioFrameSize; // 下一帧音频的 PTS，要在当前帧 PTS 的基础上向后移动“这一帧包含的采样数”
             ++audioFrames;
-            ret = avcodec_send_frame(audioEncoderContext.get(), audioFrame.get());
-            if (ret < 0 || !writeEncodedPackets(audioEncoderContext.get(), outputAudioStream)) {
+            ret = avcodec_send_frame(audioEncoderCtx.get(), audioFrame.get());
+            if (ret < 0 || !writeEncodedPackets(audioEncoderCtx.get(), outputAudioStream)) {
                 return false;
             }
             if (!flush && av_audio_fifo_size(audioFifo.get()) < audioFrameSize) {
@@ -470,9 +493,9 @@ bool Transcoder::transcode(
     auto convertAudio = [&](AVFrame* source) -> bool {
         const int outputSamples = static_cast<int>(
             av_rescale_rnd(
-                swr_get_delay(resampler.get(), audioDecoderContext->sample_rate) + source->nb_samples,  // 重采样器内部尚未输出的延迟采样数 + 每个声道包含的采样数
-                audioEncoderContext->sample_rate,   // 目标采样率，例如 48000 Hz
-                audioDecoderContext->sample_rate,   // 输入采样率，例如 44100 Hz
+                swr_get_delay(resamplerCtx.get(), audioDecoderCtx->sample_rate) + source->nb_samples,  // 重采样器内部尚未输出的延迟采样数 + 每个声道包含的采样数
+                audioEncoderCtx->sample_rate,   // 目标采样率，例如 48000 Hz
+                audioDecoderCtx->sample_rate,   // 输入采样率，例如 44100 Hz
                 AV_ROUND_UP // 向上取整
             )
         );
@@ -481,14 +504,14 @@ bool Transcoder::transcode(
             return false;
         }
         converted->nb_samples = outputSamples;  // 每个声道的采样数
-        converted->format = audioEncoderContext->sample_fmt;
-        converted->sample_rate = audioEncoderContext->sample_rate;
-        if ((ret = av_channel_layout_copy(&converted->ch_layout, &audioEncoderContext->ch_layout)) < 0 ||
+        converted->format = audioEncoderCtx->sample_fmt;
+        converted->sample_rate = audioEncoderCtx->sample_rate;
+        if ((ret = av_channel_layout_copy(&converted->ch_layout, &audioEncoderCtx->ch_layout)) < 0 ||
             (ret = av_frame_get_buffer(converted.get(), 0)) < 0) {
             return false;
         }
         const int convertedSamples = swr_convert(   // convertedSamples 表示这次实际生成的输出采样数，也是“每个声道”的数量
-            resampler.get(), 
+            resamplerCtx.get(), 
             converted->data,    // 输出音频缓冲区，转换后的音频数据会被写入这里
             outputSamples,      // 输出缓冲区最多可以容纳的采样数
             const_cast<const uint8_t**>(source->extended_data), // 指向当前解码音频帧的各个声道数据
@@ -508,26 +531,26 @@ bool Transcoder::transcode(
 
     auto flushResampler = [&]() -> bool {
         while (true) {
-            const int delayed = swr_get_delay(resampler.get(), audioDecoderContext->sample_rate);   // 查询重采样器里还有多少未输出的“输入采样等效量”
+            const int delayed = swr_get_delay(resamplerCtx.get(), audioDecoderCtx->sample_rate);   // 查询重采样器里还有多少未输出的“输入采样等效量”
             if (delayed <= 0) {
                 return true;
             }
             const int outputSamples = static_cast<int>(
-                av_rescale_rnd(delayed, audioEncoderContext->sample_rate, audioDecoderContext->sample_rate, AV_ROUND_UP)
+                av_rescale_rnd(delayed, audioEncoderCtx->sample_rate, audioDecoderCtx->sample_rate, AV_ROUND_UP)
             );
             FramePtr converted(av_frame_alloc());   // 分配一个输出音频帧
             if (!converted) {
                 return false;
             }
             converted->nb_samples = outputSamples;
-            converted->format = audioEncoderContext->sample_fmt;
-            converted->sample_rate = audioEncoderContext->sample_rate;
-            if ((ret = av_channel_layout_copy(&converted->ch_layout, &audioEncoderContext->ch_layout)) < 0 ||
+            converted->format = audioEncoderCtx->sample_fmt;
+            converted->sample_rate = audioEncoderCtx->sample_rate;
+            if ((ret = av_channel_layout_copy(&converted->ch_layout, &audioEncoderCtx->ch_layout)) < 0 ||
                 (ret = av_frame_get_buffer(converted.get(), 0)) < 0) {
                 return false;
             }
             // nullptr, 0 表示不再传入新的输入音频，只请求重采样器输出内部缓存
-            const int convertedSamples = swr_convert(resampler.get(), converted->data, outputSamples, nullptr, 0);  // 返回这次从内部缓存真正取出的音频样本数
+            const int convertedSamples = swr_convert(resamplerCtx.get(), converted->data, outputSamples, nullptr, 0);  // 返回这次从内部缓存真正取出的音频样本数
             if (convertedSamples < 0) {
                 return false;
             }
@@ -564,10 +587,10 @@ bool Transcoder::transcode(
         }
     };
 
-    while ((ret = av_read_frame(input.get(), packet.get())) >= 0) {
+    while ((ret = av_read_frame(inputCtx.get(), packet.get())) >= 0) {
         const bool isVideo = packet->stream_index == videoIndex;
         const bool isAudio = packet->stream_index == audioIndex;
-        if ((isVideo || isAudio) && !decodePacket(packet.get(), isVideo ? videoDecoderContext.get() : audioDecoderContext.get(), isVideo)) {
+        if ((isVideo || isAudio) && !decodePacket(packet.get(), isVideo ? videoDecoderCtx.get() : audioDecoderCtx.get(), isVideo)) {
             return fail("Failed during decode or encode", ret);
         }
         av_packet_unref(packet.get());
@@ -576,14 +599,14 @@ bool Transcoder::transcode(
         return fail("Failed while reading input packet", ret);
     }
 
-    if (!decodePacket(nullptr, videoDecoderContext.get(), true)) {
+    if (!decodePacket(nullptr, videoDecoderCtx.get(), true)) {
         return fail("Failed to flush video decoder or encoder", ret);
     }
-    ret = avcodec_send_frame(videoEncoderContext.get(), nullptr);
-    if (ret < 0 || !writeEncodedPackets(videoEncoderContext.get(), outputVideoStream)) {
+    ret = avcodec_send_frame(videoEncoderCtx.get(), nullptr);
+    if (ret < 0 || !writeEncodedPackets(videoEncoderCtx.get(), outputVideoStream)) {
         return fail("Failed to flush video encoder", ret);
     }
-    if (!decodePacket(nullptr, audioDecoderContext.get(), false)) {
+    if (!decodePacket(nullptr, audioDecoderCtx.get(), false)) {
         return fail("Failed to flush audio decoder", ret);
     }
     if (!flushResampler()) {
@@ -592,12 +615,12 @@ bool Transcoder::transcode(
     if (!encodeAudioFrames(true)) {
         return fail("Failed to flush audio FIFO", ret);
     }
-    ret = avcodec_send_frame(audioEncoderContext.get(), nullptr);
-    if (ret < 0 || !writeEncodedPackets(audioEncoderContext.get(), outputAudioStream)) {
+    ret = avcodec_send_frame(audioEncoderCtx.get(), nullptr);
+    if (ret < 0 || !writeEncodedPackets(audioEncoderCtx.get(), outputAudioStream)) {
         return fail("Failed to flush AAC encoder", ret);
     }
 
-    ret = av_write_trailer(output.get());
+    ret = av_write_trailer(outputCtx.get());
     if (ret < 0) {
         return fail("Failed to write MP4 trailer", ret);
     }

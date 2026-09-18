@@ -2,10 +2,10 @@
 CompilationDatabase: out/build/x64-debug
 
 CompileFlags:
-  # compile_commands.json is produced by MSVC (cl.exe). Tell clangd to parse those flags.
   Add:
     - --driver-mode=cl
+    - -ID:/dev/vcpkg/installed/x64-windows/include
   Remove:
     - /utf-8
-    - /external:*
-    - -external:*
+    - /external:W0
+    - -external:W0

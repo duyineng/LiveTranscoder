@@ -13,6 +13,7 @@ extern "C" {
 
 Remuxer::~Remuxer() {
     close();
+    close();
 }
 
 std::string Remuxer::makeError(int errnum) {
