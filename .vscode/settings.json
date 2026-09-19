@@ -1,9 +1,9 @@
-﻿{
-    "clangd.arguments":  [
-                             "--compile-commands-dir=${workspaceFolder}/out/build/x64-debug",
-                             "--background-index",
-                             "--header-insertion=never"
-                         ],
-    "C_Cpp.intelliSenseEngine":  "Disabled",
-    "clangd.path":  "C:\\Program Files\\LLVM\\bin\\clangd.exe"
+{
+    "clangd.path": "C:\\LLVM\\bin\\clangd.exe",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/out/build/x64-debug",
+        "--background-index",
+        "--header-insertion=never"
+    ],
+    "C_Cpp.intelliSenseEngine": "Disabled"
 }

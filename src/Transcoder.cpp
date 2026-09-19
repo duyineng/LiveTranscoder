@@ -229,14 +229,15 @@ bool Transcoder::transcode(
         return fail("Input decoder is not available");
     }
 
-    // 创建空的解码器上下文，并关联 AVCodec* 所代表的解码器类型
+    // 分配并初始化解码器上下文，但还没有流的编码参数
     CodecContextPtr videoDecoderCtx(avcodec_alloc_context3(videoDecoder));
     CodecContextPtr audioDecoderCtx(avcodec_alloc_context3(audioDecoder));
     if (!videoDecoderCtx || !audioDecoderCtx) {
         return fail("Failed to allocate decoder context");
     }
     
-    ret = avcodec_parameters_to_context(videoDecoderCtx.get(), inputVideoStream->codecpar); // 把输入视频流中的编码参数，复制到实际的视频解码器上下文中
+    // 把输入流中的编码参数，复制到解码器上下文中
+    ret = avcodec_parameters_to_context(videoDecoderCtx.get(), inputVideoStream->codecpar); 
     if (ret < 0) {
         return fail("Failed to configure video decoder", ret);
     }
@@ -244,7 +245,8 @@ bool Transcoder::transcode(
     if (ret < 0) {
         return fail("Failed to configure audio decoder", ret);
     }
-    // 真正的初始化并打开解码器上下文
+
+    // 通过解码器描述信息，真正的初始化并打开解码器上下文
     ret = avcodec_open2(videoDecoderCtx.get(), videoDecoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open video decoder", ret);
@@ -254,14 +256,14 @@ bool Transcoder::transcode(
         return fail("Failed to open audio decoder", ret);
     }
 
-    // 编码器描述信息对象
+    // 编码器的描述信息对象
     const AVCodec* videoEncoder = findSoftwareH264Encoder();
     const AVCodec* audioEncoder = avcodec_find_encoder(AV_CODEC_ID_AAC);
     if (!videoEncoder || !audioEncoder) {
         return fail("H.264 or AAC encoder is not available");
     }
 
-    // 创建空的编码器上下文，并关联 AVCodec* 所代表的编码器类型
+    // 分配并初始化编码器上下文，但还没有流的编码参数
     CodecContextPtr videoEncoderCtx(avcodec_alloc_context3(videoEncoder));
     CodecContextPtr audioEncoderCtx(avcodec_alloc_context3(audioEncoder));
     if (!videoEncoderCtx || !audioEncoderCtx) {
