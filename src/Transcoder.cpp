@@ -274,22 +274,22 @@ bool Transcoder::transcode(
     if (frameRate.num <= 0 || frameRate.den <= 0) {
         frameRate = AVRational{30, 1};
     }
-    videoEncoderCtx->width = options.width;
-    videoEncoderCtx->height = options.height;
-    videoEncoderCtx->pix_fmt = AV_PIX_FMT_YUV420P;      // 输入视频帧的像素格式
-    videoEncoderCtx->time_base = av_inv_q(frameRate);   // 编码器时间戳的单位是 1 / 30 秒
-    videoEncoderCtx->framerate = frameRate;             // 编码器的目标帧率
-    videoEncoderCtx->bit_rate = options.videoBitrate;   // 编码器的目标比特率，如 2.5 Mbps，
-    videoEncoderCtx->gop_size = options.gopSize;        // Group Of Pictures，表示一组连续视频帧，gop_size，表示两个关键帧（I 帧）之间最多间隔多少帧
-    videoEncoderCtx->max_b_frames = 2;
-    if (videoEncoder->id == AV_CODEC_ID_H264) { // 判断当前找到的编码器是不是 H.264 编码器
-        av_opt_set(videoEncoderCtx->priv_data, "preset", "veryfast", 0);    // 编码较快，压缩效率较低，CPU占用较低，适合实时转码
-        av_opt_set(videoEncoderCtx->priv_data, "tune", "zerolatency", 0);
+    videoEncoderCtx->width = options.width;             // 送入编码器的那一帧画面的宽
+    videoEncoderCtx->height = options.height;           // 送入编码器的那一帧画面的高
+    videoEncoderCtx->pix_fmt = AV_PIX_FMT_YUV420P;      // 送入编码器未压缩视频帧的像素格式
+    videoEncoderCtx->time_base = av_inv_q(frameRate);   
+    videoEncoderCtx->framerate = frameRate;             
+    videoEncoderCtx->bit_rate = options.videoBitrate;   // 码率，压缩后的视频流平均每秒应该流动多少比特数据量，单位是 bps
+    videoEncoderCtx->gop_size = options.gopSize;        // Group Of Pictures，表示两个关键帧（I 帧）之间最多间隔多少帧
+    videoEncoderCtx->max_b_frames = 2;                  // 非 B 帧和下一非 B 帧之间，最多插 2 个 B 帧
+    if (videoEncoder->id == AV_CODEC_ID_H264) { 
+        av_opt_set(videoEncoderCtx->priv_data, "preset", "veryfast", 0);    // 配置编码器的私有选项，编码较快，压缩效率较低，CPU占用较低，适合实时转码
+        av_opt_set(videoEncoderCtx->priv_data, "tune", "zerolatency", 0);   // 配置编码器的私有选项，低延迟，通常会关掉 B 帧
     }
 
     const int requestedRate = options.audioSampleRate > 0 ? options.audioSampleRate : audioDecoderCtx->sample_rate;
-    audioEncoderCtx->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000);
-    audioEncoderCtx->sample_fmt = chooseSampleFormat(audioEncoder);
+    audioEncoderCtx->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000); // 采样率，一秒钟采多少次声音，例如 48000 Hz
+    audioEncoderCtx->sample_fmt = chooseSampleFormat(audioEncoder); // 采样格式，例如 AV_SAMPLE_FMT_FLTP
     audioEncoderCtx->bit_rate = options.audioBitrate;
     audioEncoderCtx->time_base = AVRational{1, audioEncoderCtx->sample_rate};
     av_channel_layout_default(  // 给音频设置声道布局

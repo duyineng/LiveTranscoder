@@ -1,9 +1,0 @@
---driver-mode=cl
-/std:c++17
-/EHsc
-/ID:\projects\LiveTranscoder\include
-/ID:\projects\LiveTranscoder\src
-/DWIN32
-/D_WINDOWS
-/DUNICODE
-/D_UNICODE
