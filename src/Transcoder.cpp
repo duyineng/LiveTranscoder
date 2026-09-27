@@ -292,8 +292,8 @@ bool Transcoder::transcode(
     audioEncoderCtx->sample_fmt = chooseSampleFormat(audioEncoder); // 采样格式，例如 AV_SAMPLE_FMT_FLTP
     audioEncoderCtx->bit_rate = options.audioBitrate;
     audioEncoderCtx->time_base = AVRational{1, audioEncoderCtx->sample_rate};
-    av_channel_layout_default(  // 给音频设置声道布局
-        &audioEncoderCtx->ch_layout,    // 声道布局变量
+    av_channel_layout_default(  
+        &audioEncoderCtx->ch_layout,    // 声道布局
         audioDecoderCtx->ch_layout.nb_channels > 0 ? audioDecoderCtx->ch_layout.nb_channels : 2
     );
     ret = avcodec_open2(videoEncoderCtx.get(), videoEncoder, nullptr);
@@ -305,10 +305,11 @@ bool Transcoder::transcode(
         return fail("Failed to open AAC encoder", ret);
     }
 
+    // 将解码后的视频帧，转成编码器需要的输入格式
     SwsContextPtr scalerCtx(
         sws_getContext(
             videoDecoderCtx->width, videoDecoderCtx->height, videoDecoderCtx->pix_fmt,  // 解码器输出的视频格式，例如：568x320，YUV420P
-            videoEncoderCtx->width, videoEncoderCtx->height, videoEncoderCtx->pix_fmt,  // 编码器输出的视频格式，例如：1280x720，YUV420P
+            videoEncoderCtx->width, videoEncoderCtx->height, videoEncoderCtx->pix_fmt,  // 编码器输入的视频格式，例如：1280x720，YUV420P
             SWS_BILINEAR, nullptr, nullptr, nullptr // 表示缩放时使用“双线性插值”算法
         )
     );
@@ -320,6 +321,7 @@ bool Transcoder::transcode(
     if (inputLayout.nb_channels <= 0) {
         av_channel_layout_default(&inputLayout, 2);
     }
+    // 重采样器，将解码后的音频帧，转成编码器需要的输入格式
     SwrContext* swrCtxRaw = nullptr;
     ret = swr_alloc_set_opts2(
         &swrCtxRaw,
@@ -336,21 +338,21 @@ bool Transcoder::transcode(
         return fail("Failed to initialize audio resampler", ret);
     }
 
-    AVFormatContext* outputCtxRaw = nullptr;   // 输出容器
+    AVFormatContext* outputCtxRaw = nullptr;   // 输出容器格式上下文
     ret = avformat_alloc_output_context2(&outputCtxRaw, nullptr, "mp4", outputUrl.c_str());
     if (ret < 0 || !outputCtxRaw) {
         return fail("Failed to create MP4 output context", ret);
     }
     OutputFormatContextPtr outputCtx(outputCtxRaw);
-    AVStream* outputVideoStream = avformat_new_stream(outputCtx.get(), nullptr);   // 主要是用来描述一条视频轨道的信息，真正的一帧帧视频数据保存在 AVPacket
-    AVStream* outputAudioStream = avformat_new_stream(outputCtx.get(), nullptr);   // 主要是用来描述一条音频轨道的信息
+    AVStream* outputVideoStream = avformat_new_stream(outputCtx.get(), nullptr);   // 输入容器里的一条空的视频轨道描述信息
+    AVStream* outputAudioStream = avformat_new_stream(outputCtx.get(), nullptr);   // 输出容器里的一条空的音频轨道描述信息  
     if (!outputVideoStream || !outputAudioStream) {
         return fail("Failed to create output streams");
     }
     outputVideoStream->time_base = videoEncoderCtx->time_base;
     outputAudioStream->time_base = audioEncoderCtx->time_base;
-    ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderCtx.get());  // 把编码器上下文中的静态编码参数复制到输出流的 codecpar 中
-    if (ret < 0) {
+    ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderCtx.get());  // 把编码器上下文中的静态编码参数复制到输出视频流的 codecpar 中
+    if (ret < 0) { 
         return fail("Failed to copy video encoder parameters", ret);
     }
     ret = avcodec_parameters_from_context(outputAudioStream->codecpar, audioEncoderCtx.get());
@@ -379,8 +381,8 @@ bool Transcoder::transcode(
         return fail("Failed to allocate audio FIFO");
     }
 
-    PacketPtr packet(av_packet_alloc());
-    FramePtr decodedFrame(av_frame_alloc());
+    PacketPtr packet(av_packet_alloc());        // 包不分音频、视频，都使用这个
+    FramePtr decodedFrame(av_frame_alloc());    // 解码器输出的那一帧
     if (!packet || !decodedFrame) {
         return fail("Failed to allocate FFmpeg frame or packet");
     }
@@ -388,17 +390,17 @@ bool Transcoder::transcode(
     int64_t videoFrames = 0;
     int64_t audioFrames = 0;
 
-    auto writeEncodedPackets = [&ret, &packet, &outputCtx](AVCodecContext* encoder, AVStream* stream) -> bool {
+    auto writeEncodedPackets = [&ret, &packet, &outputCtx](AVCodecContext* encoderCtx, AVStream* outputFormatStream) -> bool {
         while (true) {
-            ret = avcodec_receive_packet(encoder, packet.get());
+            ret = avcodec_receive_packet(encoderCtx, packet.get()); // 向编码器要一个已经压缩好的包
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                 return true;
             }
             if (ret < 0) {
                 return false;
             }
-            av_packet_rescale_ts(packet.get(), encoder->time_base, stream->time_base);
-            packet->stream_index = stream->index;
+            av_packet_rescale_ts(packet.get(), encoderCtx->time_base, outputFormatStream->time_base);
+            packet->stream_index = outputFormatStream->index;
             ret = av_interleaved_write_frame(outputCtx.get(), packet.get());
             av_packet_unref(packet.get());
             if (ret < 0) {
@@ -407,36 +409,37 @@ bool Transcoder::transcode(
         }
     };
 
-    auto encodeVideoFrame = [&](AVFrame* source) -> bool {
-        FramePtr converted(av_frame_alloc());
-        if (!converted) {
+    // decoderOutputFrame 表示解码器输出的那一帧
+    auto encodeVideoFrame = [&](AVFrame* decoderOutputFrame) -> bool {
+        FramePtr encoderInputFrame(av_frame_alloc());   // 输入编码器的帧
+        if (!encoderInputFrame) {
             return false;
-        }
-        converted->format = videoEncoderCtx->pix_fmt;
-        converted->width = videoEncoderCtx->width;
-        converted->height = videoEncoderCtx->height;
-        if ((ret = av_frame_get_buffer(converted.get(), 32)) < 0) {
+        } 
+        encoderInputFrame->format = videoEncoderCtx->pix_fmt;
+        encoderInputFrame->width = videoEncoderCtx->width;
+        encoderInputFrame->height = videoEncoderCtx->height;
+        if ((ret = av_frame_get_buffer(encoderInputFrame.get(), 32)) < 0) {
             return false;
         }
         ret = sws_scale(
-            scalerCtx.get(),       // SwsContext*
-            source->data,       // 输入图像各个 plane 的数据的指针数组
-            source->linesize,   // 每个 plane 每一行占用的字节数
-            0,                  // 从输入图像的第 0 行开始处理
-            source->height,     // 本次要处理的输入图像高度，也就是输入切片包含多少行
-            converted->data,    // 输出图像各个 plane 的数据指针数组
-            converted->linesize
+            scalerCtx.get(),                // SwsContext*
+            decoderOutputFrame->data,       // 解码器输出帧的画面数据
+            decoderOutputFrame->linesize,   // 每个 plane 每一行占用的字节数
+            0,                              // 从输入图像的第 0 行开始处理
+            decoderOutputFrame->height,     // 本次要处理的输入图像高度
+            encoderInputFrame->data,        // 输出图像各个 plane 的数据指针数组
+            encoderInputFrame->linesize
         );
         if (ret <= 0) {
             return false;
-        }   
-        int64_t sourcePts = source->best_effort_timestamp;
-        if (sourcePts == AV_NOPTS_VALUE) {
-            sourcePts = videoFrames;
         }
-        converted->pts = av_rescale_q(sourcePts, inputVideoStream->time_base, videoEncoderCtx->time_base);
+        int64_t decoderOutputPts = decoderOutputFrame->best_effort_timestamp;
+        if (decoderOutputPts == AV_NOPTS_VALUE) {
+            decoderOutputPts = videoFrames;
+        }
+        encoderInputFrame->pts = av_rescale_q(decoderOutputPts, inputVideoStream->time_base, videoEncoderCtx->time_base);
         ++videoFrames;
-        ret = avcodec_send_frame(videoEncoderCtx.get(), converted.get());
+        ret = avcodec_send_frame(videoEncoderCtx.get(), encoderInputFrame.get());
         return ret >= 0 && writeEncodedPackets(videoEncoderCtx.get(), outputVideoStream);
     };
 
@@ -566,15 +569,14 @@ bool Transcoder::transcode(
         }
     };
 
-    auto decodePacket = [&](AVPacket* inputPacket, AVCodecContext* decoder, bool isVideo) -> bool {
-        // 把一个压缩的音频或视频数据包交给解码器，让解码器开始处理它
-        // 成功返回只表示：解码器接收了这个 packet
-        ret = avcodec_send_packet(decoder, inputPacket);    
+    auto decodePacket = [&](AVPacket* inputPacket, AVCodecContext* decoderCtx, bool isVideo) -> bool {
+        // 把一个压缩包交给解码器上下文，让解码器开始处理它
+        ret = avcodec_send_packet(decoderCtx, inputPacket);    
         if (ret < 0) {
             return false;
         }
         while (true) {
-            ret = avcodec_receive_frame(decoder, decodedFrame.get());
+            ret = avcodec_receive_frame(decoderCtx, decodedFrame.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                 return true;
             }
@@ -587,9 +589,9 @@ bool Transcoder::transcode(
                 return false;
             }
         }
-    };
+    }; 
 
-    while ((ret = av_read_frame(inputCtx.get(), packet.get())) >= 0) {
+    while ((ret = av_read_frame(inputCtx.get(), packet.get())) >= 0) {  // 从输入容器里读出下一个压缩包，放进 packet 中
         const bool isVideo = packet->stream_index == videoIndex;
         const bool isAudio = packet->stream_index == audioIndex;
         if ((isVideo || isAudio) && !decodePacket(packet.get(), isVideo ? videoDecoderCtx.get() : audioDecoderCtx.get(), isVideo)) {
