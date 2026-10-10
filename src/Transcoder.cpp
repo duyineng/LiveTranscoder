@@ -170,7 +170,7 @@ std::string Transcoder::makeError(int errnum) {
 bool Transcoder::transcode(
     const std::string& inputUrl,
     const std::string& outputUrl,
-    const TranscodeOptions& options,
+    const TranscodeOptions& transcodeOptions,
     std::string* error
 ) {
     auto fail = [&](const std::string& message, int errnum = 0) {
@@ -184,8 +184,8 @@ bool Transcoder::transcode(
         return false;
     };
 
-    if (options.width <= 0 || options.height <= 0) {
-        return fail("Output dimensions must be positive");  // 输出尺寸必须是正数
+    if (transcodeOptions.width <= 0 || transcodeOptions.height <= 0) {
+        return fail("Encoder input frame dimensions must be positive");  // 送入编码器的画面宽高必须是正数
     }
 
     AVFormatContext* inputFmtCtxRaw = nullptr;    // 容器格式上下文，例如 MP4、FLV
@@ -210,10 +210,10 @@ bool Transcoder::transcode(
     // streams[3]  音频  英文
     // streams[4]  字幕
     const int videoIndex = av_find_best_stream(inputFmtCtx.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);    // 寻找“最佳的视频流”，并返回它们在 inputFmtCtx->streams[] 中的索引
-    const int audioIndex = av_find_best_stream(inputFmtCtx.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);    // 寻找“最佳的音频流”，并返回它们在 inputFmtCtx->streams[] 中的索引
     if (videoIndex < 0) {
         return fail("Input has no video stream", videoIndex);
     }
+    const int audioIndex = av_find_best_stream(inputFmtCtx.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);    // 寻找“最佳的音频流”，并返回它们在 inputFmtCtx->streams[] 中的索引
     if (audioIndex < 0) {
         return fail("Input has no audio stream", audioIndex);
     }
@@ -265,43 +265,43 @@ bool Transcoder::transcode(
         return fail("H.264 or AAC encoder is not available");
     }
 
-    // 分配并初始化编码器上下文，但还没有流的编码参数
+    // 视频编码器
     CodecContextPtr videoEncoderCtx(avcodec_alloc_context3(videoEncoder));
-    CodecContextPtr audioEncoderCtx(avcodec_alloc_context3(audioEncoder));
-    if (!videoEncoderCtx || !audioEncoderCtx) {
-        return fail("Failed to allocate encoder context");
-    }
-
     AVRational frameRate = inputVideoStream->avg_frame_rate;    // 输入视频的平均帧率
     if (frameRate.num <= 0 || frameRate.den <= 0) {
         frameRate = AVRational{30, 1};
     }
-    videoEncoderCtx->width = options.width;             // 送入编码器的那一帧画面的宽
-    videoEncoderCtx->height = options.height;           // 送入编码器的那一帧画面的高
-    videoEncoderCtx->pix_fmt = AV_PIX_FMT_YUV420P;      // 送入编码器的那一帧的像素格式
-    videoEncoderCtx->time_base = av_inv_q(frameRate);   // 编码器输出这一侧的时间基
-    videoEncoderCtx->framerate = frameRate;             // 编码器输出这一侧的帧率
-    videoEncoderCtx->bit_rate = options.videoBitrate;   // 码率，压缩后的视频流平均每秒应该流动多少比特数据量，单位是 bps
-    videoEncoderCtx->gop_size = options.gopSize;        // Group Of Pictures，表示两个关键帧（I 帧）之间最多间隔多少帧
-    videoEncoderCtx->max_b_frames = 2;                  // 两个非 B 帧之间，最多夹 2 个连续的 B 帧
+    videoEncoderCtx->framerate = frameRate;                     // 编码器输出这一侧的帧率
+    videoEncoderCtx->time_base = av_inv_q(frameRate);           // 编码器输出这一侧的时间基
+
+    videoEncoderCtx->width = transcodeOptions.width;            // 送入编码器的那一帧画面的宽
+    videoEncoderCtx->height = transcodeOptions.height;          // 送入编码器的那一帧画面的高
+    videoEncoderCtx->pix_fmt = AV_PIX_FMT_YUV420P;              // 送入编码器的那一帧的像素格式
+
+    videoEncoderCtx->gop_size = transcodeOptions.gopSize;       // Group Of Pictures，表示两个关键帧（I 帧）之间最多间隔多少帧
+    videoEncoderCtx->max_b_frames = 2;                          // 两个非 B 帧之间，最多夹 2 个连续的 B 帧
+
     if (videoEncoder->id == AV_CODEC_ID_H264) { 
         av_opt_set(videoEncoderCtx->priv_data, "preset", "veryfast", 0);    // 配置编码器的私有选项，编码较快，压缩效率较低，CPU占用较低，适合实时转码
         av_opt_set(videoEncoderCtx->priv_data, "tune", "zerolatency", 0);   // 配置编码器的私有选项，低延迟，通常会关掉 B 帧
     }
+    videoEncoderCtx->bit_rate = transcodeOptions.videoBitrate;  // 码率，压缩后的视频流平均每秒应该流动多少比特数据量，单位是 bps
+    ret = avcodec_open2(videoEncoderCtx.get(), videoEncoder, nullptr);
+    if (ret < 0) {
+        return fail("Failed to open H.264 encoder", ret);
+    }
 
-    const int requestedRate = options.audioSampleRate > 0 ? options.audioSampleRate : audioDecoderCtx->sample_rate;
-    audioEncoderCtx->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000); // 编码器输入采样率，输出也是这个值
+    // 音频编码器
+    CodecContextPtr audioEncoderCtx(avcodec_alloc_context3(audioEncoder));
+    const int requestedRate = transcodeOptions.audioSampleRate > 0 ? transcodeOptions.audioSampleRate : audioDecoderCtx->sample_rate;
+    audioEncoderCtx->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000);   // 编码器输入采样率，输出也是这个值
     audioEncoderCtx->sample_fmt = chooseSampleFormat(audioEncoder); // 采样格式，送进编码器的未压缩 PCM 的格式，例如 AV_SAMPLE_FMT_FLTP
-    audioEncoderCtx->bit_rate = options.audioBitrate;
+    audioEncoderCtx->bit_rate = transcodeOptions.audioBitrate;      // 码率，压缩后的音频流平均每秒应该流动多少比特数据量，单位是 bps
     audioEncoderCtx->time_base = AVRational{1, audioEncoderCtx->sample_rate};
     av_channel_layout_default(  // 以解码器的声道数为基础，定义一个声道布局
         &audioEncoderCtx->ch_layout,    
         audioDecoderCtx->ch_layout.nb_channels > 0 ? audioDecoderCtx->ch_layout.nb_channels : 2
     );
-    ret = avcodec_open2(videoEncoderCtx.get(), videoEncoder, nullptr);
-    if (ret < 0) {
-        return fail("Failed to open H.264 encoder", ret);
-    }
     ret = avcodec_open2(audioEncoderCtx.get(), audioEncoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open AAC encoder", ret);
@@ -320,16 +320,16 @@ bool Transcoder::transcode(
     }
 
     // --- 制作音频重采样器 ---
-    AVChannelLayout inputLayout = audioDecoderCtx->ch_layout;
-    if (inputLayout.nb_channels <= 0) {
-        av_channel_layout_default(&inputLayout, 2);
+    AVChannelLayout audioDecoderChLayout = audioDecoderCtx->ch_layout;
+    if (audioDecoderChLayout.nb_channels <= 0) {
+        av_channel_layout_default(&audioDecoderChLayout, 2);
     }
     // 重采样器，将解码后的音频帧，转成编码器需要的输入格式
     SwrContext* swrCtxRaw = nullptr;
     ret = swr_alloc_set_opts2(
         &swrCtxRaw,
         &audioEncoderCtx->ch_layout, audioEncoderCtx->sample_fmt, audioEncoderCtx->sample_rate, // 声道布局，采样格式，采样率
-        &inputLayout, audioDecoderCtx->sample_fmt, audioDecoderCtx->sample_rate,
+        &audioDecoderChLayout, audioDecoderCtx->sample_fmt, audioDecoderCtx->sample_rate,
         0, nullptr
     );
     SwrContextPtr resamplerCtx(swrCtxRaw);
@@ -341,27 +341,31 @@ bool Transcoder::transcode(
         return fail("Failed to initialize audio resampler", ret);
     }
 
+    // --- 制作输出容器格式上下文 ---
     AVFormatContext* outputFmtCtxRaw = nullptr;   // 输出容器格式上下文
     ret = avformat_alloc_output_context2(&outputFmtCtxRaw, nullptr, "mp4", outputUrl.c_str());
     if (ret < 0 || !outputFmtCtxRaw) {
         return fail("Failed to create MP4 output context", ret);
     }
     OutputFormatContextPtr outputFmtCtx(outputFmtCtxRaw);
+
     AVStream* outputVideoStream = avformat_new_stream(outputFmtCtx.get(), nullptr);   // 输出容器里的一条空的视频轨道描述信息
-    AVStream* outputAudioStream = avformat_new_stream(outputFmtCtx.get(), nullptr);   // 输出容器里的一条空的音频轨道描述信息  
-    if (!outputVideoStream || !outputAudioStream) {
-        return fail("Failed to create output streams");
-    }
     outputVideoStream->time_base = videoEncoderCtx->time_base;
-    outputAudioStream->time_base = audioEncoderCtx->time_base;
     ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderCtx.get());  // 把编码器上下文中的静态编码参数复制到输出视频流的 codecpar 中
     if (ret < 0) { 
         return fail("Failed to copy video encoder parameters", ret);
     }
+
+    AVStream* outputAudioStream = avformat_new_stream(outputFmtCtx.get(), nullptr);   // 输出容器里的一条空的音频轨道描述信息  
+    if (!outputVideoStream || !outputAudioStream) {
+        return fail("Failed to create output streams");
+    }
+    outputAudioStream->time_base = audioEncoderCtx->time_base;
     ret = avcodec_parameters_from_context(outputAudioStream->codecpar, audioEncoderCtx.get());
     if (ret < 0) {
         return fail("Failed to copy audio encoder parameters", ret);
     }
+
     // outputFmtCtx->oformat->flags，输出容器格式的标志集合
     // AVFMT_NOFILE，该格式不需要 FFmpeg 手动打开文件 IO
     if (!(outputFmtCtx->oformat->flags & AVFMT_NOFILE)) { 
@@ -377,6 +381,7 @@ bool Transcoder::transcode(
 
     // audioEncoderCtx->frame_size 为每个声道一帧中应有的采样点数
     const int audioFrameSize = audioEncoderCtx->frame_size > 0 ? audioEncoderCtx->frame_size : 1024;
+
     AudioFifoPtr audioFifo(
         av_audio_fifo_alloc(audioEncoderCtx->sample_fmt, audioEncoderCtx->ch_layout.nb_channels, 1)
     );
@@ -389,6 +394,7 @@ bool Transcoder::transcode(
     if (!packet || !decodedFrame) {
         return fail("Failed to allocate FFmpeg frame or packet");
     }
+    
     int64_t nextAudioPts = 0;
     int64_t videoFrames = 0;
     int64_t audioFrames = 0;
@@ -633,7 +639,7 @@ bool Transcoder::transcode(
     if (ret < 0) {
         return fail("Failed to write MP4 trailer", ret);
     }
-    if (options.verbose) {
+    if (transcodeOptions.verbose) {
         std::cout << "Transcode finished. Video frames: " << videoFrames
                   << ", audio frames: " << audioFrames << "\n"
                   << "Output file: " << outputUrl << "\n";

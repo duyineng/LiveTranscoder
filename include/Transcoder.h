@@ -17,7 +17,7 @@ public:
     bool transcode(
         const std::string& inputUrl,
         const std::string& outputUrl,
-        const TranscodeOptions& options = {},
+        const TranscodeOptions& transcodeOptions = {},
         std::string* error = nullptr
     );
 
