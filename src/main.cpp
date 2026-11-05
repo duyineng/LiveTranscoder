@@ -1,5 +1,3 @@
-#include "MediaProbe.h"
-#include "Remuxer.h"
 #include "Transcoder.h"
 
 extern "C" {
@@ -55,14 +53,10 @@ namespace {
     void printUsage() {
         std::cout
             << "Usage:\n"
-            << "  LiveTranscoder version\n"
-            << "  LiveTranscoder probe <input_file_or_url>\n"
-            << "  LiveTranscoder remux <input_file_or_url> <output_file>\n"
-            << "  LiveTranscoder transcode <input_file_or_url> <output.mp4> [width height]\n"
+            << "  LiveTranscoder transcode <input_file_or_url> <output_file> [width height]\n"
             << "\nExamples:\n"
-        << "  LiveTranscoder probe D:\\\\videos\\\\test.mp4\n"
-            << "  LiveTranscoder probe http://example.com/test.mp4\n"
-            << "  LiveTranscoder transcode test.mp4 output.mp4 1280 720\n";
+            << "  LiveTranscoder transcode test.mp4 output.mp4 1280 720\n"
+            << "  LiveTranscoder transcode test.mp4 output.flv\n";
     }
 
     void printVersion() {
@@ -91,58 +85,6 @@ int main(int argc, char* argv[]) {
 
     std::string command = argv[1];
 
-    if (command == "version") {
-        return 0;
-    }
-
-    if (command == "probe") {
-        if (argc < 3) {
-            std::cerr << "Error: missing input file or url.\n\n";
-            printUsage();
-            return 1;
-        }
-
-        std::string input = argv[2];
-
-        MediaProbe probe;
-        std::string error;
-
-        auto info = probe.probe(input, &error);
-        if (!info) {
-            std::cerr << "Probe failed: " << error << "\n";
-            return 2;
-        }
-
-        printMediaInfo(*info);
-        return 0;
-    }
-
-    if (command == "remux") {
-        if (argc < 4) {
-            std::cerr << "Missing input or output.\n\n";
-            printUsage();
-            return 1;
-        }
-
-        const std::string inputUrl = argv[2];
-        const std::string outputUrl = argv[3];
-
-        Remuxer remuxer;
-        RemuxOptions options;
-        options.copyVideo = true;
-        options.copyAudio = true;
-        options.verbose = true;
-
-        std::string error;
-        if (!remuxer.remux(inputUrl, outputUrl, options, &error)) {
-            std::cerr << "Remux failed: " << error << "\n";
-            return 1;
-        }
-
-        std::cout << "Remux success.\n";
-        return 0;
-    }
-
     if (command == "transcode") {
         if (argc < 4) {
             std::cerr << "Missing input or output.\n\n";
@@ -150,17 +92,17 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        TranscodeOptions options;
+        TranscodeOptions transcodeOptions;
         if (argc >= 5) {
-            options.width = std::stoi(argv[4]);
+            transcodeOptions.width = std::stoi(argv[4]);
         }
         if (argc >= 6) {
-            options.height = std::stoi(argv[5]);
+            transcodeOptions.height = std::stoi(argv[5]);
         }
 
         Transcoder transcoder;
         std::string error;
-        if (!transcoder.transcode(argv[2], argv[3], options, &error)) {
+        if (!transcoder.transcode(argv[2], argv[3], transcodeOptions, error)) {
             std::cerr << "Transcode failed: " << error << "\n";
             return 1;
         }

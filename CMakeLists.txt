@@ -12,8 +12,6 @@ message(STATUS "VCPKG_TARGET_TRIPLET = ${VCPKG_TARGET_TRIPLET}")
 
 add_executable(LiveTranscoder
     src/main.cpp
-    src/MediaProbe.cpp
-    src/Remuxer.cpp
     src/Transcoder.cpp
 )
 

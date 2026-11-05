@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 
@@ -171,15 +172,13 @@ bool Transcoder::transcode(
     const std::string& inputUrl,
     const std::string& outputUrl,
     const TranscodeOptions& transcodeOptions,
-    std::string* error
+    std::string& error
 ) {
     auto fail = [&](const std::string& message, int errnum = 0) {
-        if (error) {
-            *error = message;
-            if (errnum < 0) {
-                *error += ": ";
-                *error += makeError(errnum);
-            }
+        error = message;
+        if (errnum < 0) {
+            error += ": ";
+            error += makeError(errnum);
         }
         return false;
     };
@@ -265,6 +264,14 @@ bool Transcoder::transcode(
         return fail("H.264 or AAC encoder is not available");
     }
 
+    // 按 outputUrl 后缀选择容器。out.mp4 用 MP4，out.flv 用 FLV。
+    AVFormatContext* outputFmtCtxRaw = nullptr;
+    ret = avformat_alloc_output_context2(&outputFmtCtxRaw, nullptr, nullptr, outputUrl.c_str());
+    if (ret < 0 || !outputFmtCtxRaw) {
+        return fail("Failed to create output context: " + outputUrl, ret);
+    }
+    OutputFormatContextPtr outputFmtCtx(outputFmtCtxRaw);
+
     // 视频编码器
     CodecContextPtr videoEncoderCtx(avcodec_alloc_context3(videoEncoder));
     AVRational frameRate = inputVideoStream->avg_frame_rate;    // 输入视频的平均帧率
@@ -286,6 +293,9 @@ bool Transcoder::transcode(
         av_opt_set(videoEncoderCtx->priv_data, "tune", "zerolatency", 0);   // 配置编码器的私有选项，低延迟，通常会关掉 B 帧
     }
     videoEncoderCtx->bit_rate = transcodeOptions.videoBitrate;  // 码率，压缩后的视频流平均每秒应该流动多少比特数据量，单位是 bps
+    if (outputFmtCtx->oformat->flags & AVFMT_GLOBALHEADER) {
+        videoEncoderCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;  // 把 SPS/PPS 放进 extradata，供 MP4、FLV 等容器使用
+    }
     ret = avcodec_open2(videoEncoderCtx.get(), videoEncoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open H.264 encoder", ret);
@@ -302,6 +312,9 @@ bool Transcoder::transcode(
         &audioEncoderCtx->ch_layout,    
         audioDecoderCtx->ch_layout.nb_channels > 0 ? audioDecoderCtx->ch_layout.nb_channels : 2
     );
+    if (outputFmtCtx->oformat->flags & AVFMT_GLOBALHEADER) {
+        audioEncoderCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
     ret = avcodec_open2(audioEncoderCtx.get(), audioEncoder, nullptr);
     if (ret < 0) {
         return fail("Failed to open AAC encoder", ret);
@@ -341,14 +354,7 @@ bool Transcoder::transcode(
         return fail("Failed to initialize audio resampler", ret);
     }
 
-    // --- 制作输出容器格式上下文 ---
-    AVFormatContext* outputFmtCtxRaw = nullptr;   // 输出容器格式上下文
-    ret = avformat_alloc_output_context2(&outputFmtCtxRaw, nullptr, "mp4", outputUrl.c_str());
-    if (ret < 0 || !outputFmtCtxRaw) {
-        return fail("Failed to create MP4 output context", ret);
-    }
-    OutputFormatContextPtr outputFmtCtx(outputFmtCtxRaw);
-
+    // --- 把已经打开的编码器装进上面选好的输出容器 ---
     AVStream* outputVideoStream = avformat_new_stream(outputFmtCtx.get(), nullptr);   // 输出容器里的一条空的视频轨道描述信息
     outputVideoStream->time_base = videoEncoderCtx->time_base;
     ret = avcodec_parameters_from_context(outputVideoStream->codecpar, videoEncoderCtx.get());  // 把编码器上下文中的静态编码参数复制到输出视频流的 codecpar 中
@@ -369,14 +375,14 @@ bool Transcoder::transcode(
     // outputFmtCtx->oformat->flags，输出容器格式的标志集合
     // AVFMT_NOFILE，该格式不需要 FFmpeg 手动打开文件 IO
     if (!(outputFmtCtx->oformat->flags & AVFMT_NOFILE)) { 
-        ret = avio_open(&outputFmtCtx->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);   // avio_open() 会打开输出地址，并创建一个 AVIOContext，保存到 outputFmtCtx->pb，为 mp4 文件的写入通道
+        ret = avio_open(&outputFmtCtx->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);   // 打开输出地址，创建写入通道
         if (ret < 0) {
             return fail("Failed to open output: " + outputUrl, ret);
         }
     }
     ret = avformat_write_header(outputFmtCtx.get(), nullptr); // 向输出文件写入“容器文件头”
     if (ret < 0) {
-        return fail("Failed to write MP4 header", ret);
+        return fail("Failed to write output header", ret);
     }
 
     // audioEncoderCtx->frame_size 为每个声道一帧中应有的采样点数
@@ -505,10 +511,12 @@ bool Transcoder::transcode(
         return true;
     };
 
-    auto convertAudio = [&](AVFrame* decodedAudioFrame) -> bool {
+    auto resampleDecodedAudio = [&](AVFrame* decodedAudioFrame) -> bool {   // 传入解码后的音频帧
         const int outputSamples = static_cast<int>(
             av_rescale_rnd(
-                swr_get_delay(resamplerCtx.get(), audioDecoderCtx->sample_rate) + decodedAudioFrame->nb_samples,  // 重采样器内部尚未输出的延迟采样数 + 每个声道包含的采样数
+                // audioDecoderCtx->sample_rate：这里传入源采样率，表示「请按输入采样点的个数告诉我」。
+                // resamplerCtx：被查询的对象
+                swr_get_delay(resamplerCtx.get(), audioDecoderCtx->sample_rate) + decodedAudioFrame->nb_samples,  // 重采样器内部积压的采样点数 + 新送进去的这一帧的采样点数
                 audioEncoderCtx->sample_rate,   // 目标采样率，例如 48000 Hz
                 audioDecoderCtx->sample_rate,   // 输入采样率，例如 44100 Hz
                 AV_ROUND_UP // 向上取整
@@ -521,8 +529,10 @@ bool Transcoder::transcode(
         converted->nb_samples = outputSamples;  // 每个声道的采样数
         converted->format = audioEncoderCtx->sample_fmt;
         converted->sample_rate = audioEncoderCtx->sample_rate;
-        if ((ret = av_channel_layout_copy(&converted->ch_layout, &audioEncoderCtx->ch_layout)) < 0 ||
-            (ret = av_frame_get_buffer(converted.get(), 0)) < 0) {
+        if (
+            (ret = av_channel_layout_copy(&converted->ch_layout, &audioEncoderCtx->ch_layout)) < 0 ||
+            (ret = av_frame_get_buffer(converted.get(), 0)) < 0
+        ) {
             return false;
         }
         const int convertedSamples = swr_convert(   // convertedSamples 表示这次实际生成的输出采样数，也是“每个声道”的数量
@@ -543,6 +553,52 @@ bool Transcoder::transcode(
         }
         return encodeAudioFrames(false);
     };
+
+    auto decodePacket = [&](AVPacket* inputPacket, AVCodecContext* decoderCtx, bool isVideo) -> bool {
+        // 把一个压缩包交给解码器上下文
+        ret = avcodec_send_packet(decoderCtx, inputPacket);    
+        if (ret < 0) {
+            return false;
+        }
+
+        while (true) {
+            ret = avcodec_receive_frame(decoderCtx, decodedFrame.get());
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) { // 现在没有完整帧，还要再送包；或者没有更多帧了，结束
+                return true;
+            }
+            if (ret < 0) {
+                return false;
+            }
+            const bool ok = isVideo ? encodeVideoFrame(decodedFrame.get()) : resampleDecodedAudio(decodedFrame.get());
+            av_frame_unref(decodedFrame.get());
+            if (!ok) {
+                return false;
+            }
+        }
+    }; 
+
+    while ((ret = av_read_frame(inputFmtCtx.get(), packet.get())) >= 0) {  // 从输入容器里读出下一个压缩包，放进 packet 中
+        const bool isVideo = packet->stream_index == videoIndex;
+        const bool isAudio = packet->stream_index == audioIndex;
+        if ((isVideo || isAudio) && !decodePacket(packet.get(), isVideo ? videoDecoderCtx.get() : audioDecoderCtx.get(), isVideo)) {
+            return fail("Failed during decode or encode", ret);
+        }
+        av_packet_unref(packet.get());
+    }
+    if (ret != AVERROR_EOF) {
+        return fail("Failed while reading input packet", ret);
+    }
+
+    if (!decodePacket(nullptr, videoDecoderCtx.get(), true)) {
+        return fail("Failed to flush video decoder or encoder", ret);
+    }
+    ret = avcodec_send_frame(videoEncoderCtx.get(), nullptr);
+    if (ret < 0 || !writeEncodedPackets(videoEncoderCtx.get(), outputVideoStream)) {
+        return fail("Failed to flush video encoder", ret);
+    }
+    if (!decodePacket(nullptr, audioDecoderCtx.get(), false)) {
+        return fail("Failed to flush audio decoder", ret);
+    }
 
     auto flushResampler = [&]() -> bool {
         while (true) {
@@ -579,51 +635,6 @@ bool Transcoder::transcode(
         }
     };
 
-    auto decodePacket = [&](AVPacket* inputPacket, AVCodecContext* decoderCtx, bool isVideo) -> bool {
-        // 把一个压缩包交给解码器上下文
-        ret = avcodec_send_packet(decoderCtx, inputPacket);    
-        if (ret < 0) {
-            return false;
-        }
-
-        while (true) {
-            ret = avcodec_receive_frame(decoderCtx, decodedFrame.get());
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                return true;
-            }
-            if (ret < 0) {
-                return false;
-            }
-            const bool ok = isVideo ? encodeVideoFrame(decodedFrame.get()) : convertAudio(decodedFrame.get());
-            av_frame_unref(decodedFrame.get());
-            if (!ok) {
-                return false;
-            }
-        }
-    }; 
-
-    while ((ret = av_read_frame(inputFmtCtx.get(), packet.get())) >= 0) {  // 从输入容器里读出下一个压缩包，放进 packet 中
-        const bool isVideo = packet->stream_index == videoIndex;
-        const bool isAudio = packet->stream_index == audioIndex;
-        if ((isVideo || isAudio) && !decodePacket(packet.get(), isVideo ? videoDecoderCtx.get() : audioDecoderCtx.get(), isVideo)) {
-            return fail("Failed during decode or encode", ret);
-        }
-        av_packet_unref(packet.get());
-    }
-    if (ret != AVERROR_EOF) {
-        return fail("Failed while reading input packet", ret);
-    }
-
-    if (!decodePacket(nullptr, videoDecoderCtx.get(), true)) {
-        return fail("Failed to flush video decoder or encoder", ret);
-    }
-    ret = avcodec_send_frame(videoEncoderCtx.get(), nullptr);
-    if (ret < 0 || !writeEncodedPackets(videoEncoderCtx.get(), outputVideoStream)) {
-        return fail("Failed to flush video encoder", ret);
-    }
-    if (!decodePacket(nullptr, audioDecoderCtx.get(), false)) {
-        return fail("Failed to flush audio decoder", ret);
-    }
     if (!flushResampler()) {
         return fail("Failed to flush audio resampler", ret);
     }
@@ -637,7 +648,7 @@ bool Transcoder::transcode(
 
     ret = av_write_trailer(outputFmtCtx.get());
     if (ret < 0) {
-        return fail("Failed to write MP4 trailer", ret);
+        return fail("Failed to write output trailer", ret);
     }
     if (transcodeOptions.verbose) {
         std::cout << "Transcode finished. Video frames: " << videoFrames
@@ -646,3 +657,4 @@ bool Transcoder::transcode(
     }
     return true;
 }
+
