@@ -55,8 +55,8 @@ namespace {
             << "Usage:\n"
             << "  LiveTranscoder transcode <input_file_or_url> <output_file> [width height]\n"
             << "\nExamples:\n"
-            << "  LiveTranscoder transcode test.mp4 output.mp4 1280 720\n"
-            << "  LiveTranscoder transcode test.mp4 output.flv\n";
+            << "  LiveTranscoder transcode test.mp4 output.flv\n"
+            << "  LiveTranscoder transcode test.mp4 output.flv 1280 720\n";
     }
 
     void printVersion() {
@@ -92,12 +92,14 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        TranscodeOptions transcodeOptions;
+        std::optional<TranscodeOptions> transcodeOptions;
         if (argc >= 5) {
-            transcodeOptions.width = std::stoi(argv[4]);
-        }
-        if (argc >= 6) {
-            transcodeOptions.height = std::stoi(argv[5]);
+            TranscodeOptions options;
+            options.width = std::stoi(argv[4]);
+            if (argc >= 6) {
+                options.height = std::stoi(argv[5]);
+            }
+            transcodeOptions = options;
         }
 
         Transcoder transcoder;
@@ -106,7 +108,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "Transcode failed: " << error << "\n";
             return 1;
         }
-        std::cout << "Transcode success.\n";
+        std::cout << (transcodeOptions ? "Transcode success.\n" : "Container copy success.\n");
         return 0;
     }
 

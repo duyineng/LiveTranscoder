@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -171,10 +172,10 @@ std::string Transcoder::makeError(int errnum) {
 bool Transcoder::transcode(
     const std::string& inputUrl,
     const std::string& outputUrl,
-    const TranscodeOptions& transcodeOptions,
+    std::optional<TranscodeOptions> transcodeOptions,
     std::string& error
 ) {
-    auto fail = [&](const std::string& message, int errnum = 0) {
+    auto fail = [&](const std::string& message, int errnum = 0) -> bool {
         error = message;
         if (errnum < 0) {
             error += ": ";
@@ -182,10 +183,6 @@ bool Transcoder::transcode(
         }
         return false;
     };
-
-    if (transcodeOptions.width <= 0 || transcodeOptions.height <= 0) {
-        return fail("Encoder input frame dimensions must be positive");  // 送入编码器的画面宽高必须是正数
-    }
 
     AVFormatContext* inputFmtCtxRaw = nullptr;    // 容器格式上下文，例如 MP4、FLV
     int ret = avformat_open_input(&inputFmtCtxRaw, inputUrl.c_str(), nullptr, nullptr);   // 分配并初始化 inputFmtCtxRaw
@@ -198,6 +195,95 @@ bool Transcoder::transcode(
     ret = avformat_find_stream_info(inputFmtCtx.get(), nullptr);  // 在 inputFmtCtx 中补充更多信息，例如音视频流信息
     if (ret < 0) {
         return fail("Failed to find input stream info", ret);
+    }
+
+    // 没有转码参数：不解码，把原来的压缩包按 outputUrl 后缀装进新容器。
+    if (!transcodeOptions) {
+        AVFormatContext* outputFmtCtxRaw = nullptr;
+        ret = avformat_alloc_output_context2(&outputFmtCtxRaw, nullptr, nullptr, outputUrl.c_str());
+        if (ret < 0 || !outputFmtCtxRaw) {
+            return fail("Failed to create output context: " + outputUrl, ret);
+        }
+        OutputFormatContextPtr outputFmtCtx(outputFmtCtxRaw);
+
+        std::vector<int> streamMapping(inputFmtCtx->nb_streams, -1);
+        int outputStreamIndex = 0;
+        for (unsigned int i = 0; i < inputFmtCtx->nb_streams; ++i) {
+            AVStream* inputStream = inputFmtCtx->streams[i];
+            const AVMediaType mediaType = inputStream->codecpar->codec_type;
+            if (mediaType != AVMEDIA_TYPE_VIDEO && mediaType != AVMEDIA_TYPE_AUDIO) {
+                continue;
+            }
+
+            AVStream* outputStream = avformat_new_stream(outputFmtCtx.get(), nullptr);
+            if (!outputStream) {
+                return fail("Failed to create output stream");
+            }
+            streamMapping[i] = outputStreamIndex++;
+            ret = avcodec_parameters_copy(outputStream->codecpar, inputStream->codecpar);
+            if (ret < 0) {
+                return fail("Failed to copy stream parameters", ret);
+            }
+            // 清掉原容器的 codec_tag，例如 MP4 的 avc1 不一定适合 FLV。
+            outputStream->codecpar->codec_tag = 0;
+            outputStream->time_base = inputStream->time_base;
+        }
+        if (outputStreamIndex == 0) {
+            return fail("No audio or video stream to copy");
+        }
+
+        if (!(outputFmtCtx->oformat->flags & AVFMT_NOFILE)) {
+            ret = avio_open(&outputFmtCtx->pb, outputUrl.c_str(), AVIO_FLAG_WRITE);
+            if (ret < 0) {
+                return fail("Failed to open output: " + outputUrl, ret);
+            }
+        }
+        ret = avformat_write_header(outputFmtCtx.get(), nullptr);
+        if (ret < 0) {
+            return fail("Failed to write output header", ret);
+        }
+
+        PacketPtr packet(av_packet_alloc());
+        if (!packet) {
+            return fail("Failed to allocate packet");
+        }
+        int64_t packetCount = 0;
+        while ((ret = av_read_frame(inputFmtCtx.get(), packet.get())) >= 0) {
+            const int inputStreamIndex = packet->stream_index;
+            if (
+                inputStreamIndex < 0
+                || inputStreamIndex >= static_cast<int>(streamMapping.size())
+                || streamMapping[inputStreamIndex] < 0
+            ) {
+                av_packet_unref(packet.get());
+                continue;
+            }
+
+            AVStream* inputStream = inputFmtCtx->streams[inputStreamIndex];
+            AVStream* outputStream = outputFmtCtx->streams[streamMapping[inputStreamIndex]];
+            packet->stream_index = streamMapping[inputStreamIndex];
+            av_packet_rescale_ts(packet.get(), inputStream->time_base, outputStream->time_base);
+            packet->pos = -1;
+            ret = av_interleaved_write_frame(outputFmtCtx.get(), packet.get());
+            if (ret < 0) {
+                return fail("Failed to write packet", ret);
+            }
+            ++packetCount;
+        }
+        if (ret != AVERROR_EOF) {
+            return fail("Failed while reading input packet", ret);
+        }
+        ret = av_write_trailer(outputFmtCtx.get());
+        if (ret < 0) {
+            return fail("Failed to write output trailer", ret);
+        }
+        std::cout << "Container copy finished. Packet count: " << packetCount << "\n"
+                  << "Output file: " << outputUrl << "\n";
+        return true;
+    }
+
+    if (transcodeOptions->width <= 0 || transcodeOptions->height <= 0) {
+        return fail("Encoder input frame dimensions must be positive");  // 送入编码器的画面宽高必须是正数
     }
 
     // --- 制作解码器 ---
@@ -281,18 +367,18 @@ bool Transcoder::transcode(
     videoEncoderCtx->framerate = frameRate;                     // 编码器输出这一侧的帧率
     videoEncoderCtx->time_base = av_inv_q(frameRate);           // 编码器输出这一侧的时间基
 
-    videoEncoderCtx->width = transcodeOptions.width;            // 送入编码器的那一帧画面的宽
-    videoEncoderCtx->height = transcodeOptions.height;          // 送入编码器的那一帧画面的高
+    videoEncoderCtx->width = transcodeOptions->width;            // 送入编码器的那一帧画面的宽
+    videoEncoderCtx->height = transcodeOptions->height;          // 送入编码器的那一帧画面的高
     videoEncoderCtx->pix_fmt = AV_PIX_FMT_YUV420P;              // 送入编码器的那一帧的像素格式
 
-    videoEncoderCtx->gop_size = transcodeOptions.gopSize;       // Group Of Pictures，表示两个关键帧（I 帧）之间最多间隔多少帧
+    videoEncoderCtx->gop_size = transcodeOptions->gopSize;       // Group Of Pictures，表示两个关键帧（I 帧）之间最多间隔多少帧
     videoEncoderCtx->max_b_frames = 2;                          // 两个非 B 帧之间，最多夹 2 个连续的 B 帧
 
     if (videoEncoder->id == AV_CODEC_ID_H264) { 
         av_opt_set(videoEncoderCtx->priv_data, "preset", "veryfast", 0);    // 配置编码器的私有选项，编码较快，压缩效率较低，CPU占用较低，适合实时转码
         av_opt_set(videoEncoderCtx->priv_data, "tune", "zerolatency", 0);   // 配置编码器的私有选项，低延迟，通常会关掉 B 帧
     }
-    videoEncoderCtx->bit_rate = transcodeOptions.videoBitrate;  // 码率，压缩后的视频流平均每秒应该流动多少比特数据量，单位是 bps
+    videoEncoderCtx->bit_rate = transcodeOptions->videoBitrate;  // 码率，压缩后的视频流平均每秒应该流动多少比特数据量，单位是 bps
     if (outputFmtCtx->oformat->flags & AVFMT_GLOBALHEADER) {
         videoEncoderCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;  // 把 SPS/PPS 放进 extradata，供 MP4、FLV 等容器使用
     }
@@ -303,10 +389,10 @@ bool Transcoder::transcode(
 
     // 音频编码器
     CodecContextPtr audioEncoderCtx(avcodec_alloc_context3(audioEncoder));
-    const int requestedRate = transcodeOptions.audioSampleRate > 0 ? transcodeOptions.audioSampleRate : audioDecoderCtx->sample_rate;
+    const int requestedRate = transcodeOptions->audioSampleRate > 0 ? transcodeOptions->audioSampleRate : audioDecoderCtx->sample_rate;
     audioEncoderCtx->sample_rate = chooseSampleRate(audioEncoder, requestedRate, 48'000);   // 编码器输入采样率，输出也是这个值
     audioEncoderCtx->sample_fmt = chooseSampleFormat(audioEncoder); // 采样格式，送进编码器的未压缩 PCM 的格式，例如 AV_SAMPLE_FMT_FLTP
-    audioEncoderCtx->bit_rate = transcodeOptions.audioBitrate;      // 码率，压缩后的音频流平均每秒应该流动多少比特数据量，单位是 bps
+    audioEncoderCtx->bit_rate = transcodeOptions->audioBitrate;      // 码率，压缩后的音频流平均每秒应该流动多少比特数据量，单位是 bps
     audioEncoderCtx->time_base = AVRational{1, audioEncoderCtx->sample_rate};
     av_channel_layout_default(  // 以解码器的声道数为基础，定义一个声道布局
         &audioEncoderCtx->ch_layout,    
@@ -650,7 +736,7 @@ bool Transcoder::transcode(
     if (ret < 0) {
         return fail("Failed to write output trailer", ret);
     }
-    if (transcodeOptions.verbose) {
+    if (transcodeOptions->verbose) {
         std::cout << "Transcode finished. Video frames: " << videoFrames
                   << ", audio frames: " << audioFrames << "\n"
                   << "Output file: " << outputUrl << "\n";
