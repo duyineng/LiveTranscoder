@@ -54,9 +54,12 @@ namespace {
         std::cout
             << "Usage:\n"
             << "  LiveTranscoder transcode <input_file_or_url> <output_file> [width height]\n"
+            << "  LiveTranscoder hls <input_file> <output_dir> [width height]\n"
             << "\nExamples:\n"
             << "  LiveTranscoder transcode test.mp4 output.flv\n"
-            << "  LiveTranscoder transcode test.mp4 output.flv 1280 720\n";
+            << "  LiveTranscoder transcode test.mp4 output.flv 1280 720\n"
+            << "  LiveTranscoder hls test.mp4 out_dir\n"
+            << "  LiveTranscoder hls test.mp4 out_dir 1280 720\n";
     }
 
     void printVersion() {
@@ -109,6 +112,44 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cout << (transcodeOptions ? "Transcode success.\n" : "Container copy success.\n");
+        return 0;
+    }
+
+    if (command == "hls") {
+        if (argc < 4) {
+            std::cerr << "Missing input or output directory.\n\n";
+            printUsage();
+            return 1;
+        }
+        if (argc == 5) {
+            std::cerr << "Width and height must both be provided.\n\n";
+            printUsage();
+            return 1;
+        }
+
+        HlsRequest request;
+        if (argc >= 6) {
+            HlsVariant variant;
+            variant.width = std::stoi(argv[4]);
+            variant.height = std::stoi(argv[5]);
+            variant.videoBitrate = TranscodeOptions{}.videoBitrate;
+            variant.name = std::to_string(variant.height) + "p";
+            request.variants.push_back(std::move(variant));
+        } else {
+            request.variants = {
+                {1920, 1080, 5'000'000, "1080p"},
+                {1280, 720, 2'500'000, "720p"},
+                {854, 480, 1'000'000, "480p"},
+            };
+        }
+
+        Transcoder transcoder;
+        std::string error;
+        if (!transcoder.transcodeHls(argv[2], argv[3], request, error)) {
+            std::cerr << "HLS failed: " << error << "\n";
+            return 1;
+        }
+        std::cout << "HLS success.\n";
         return 0;
     }
 

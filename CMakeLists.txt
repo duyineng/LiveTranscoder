@@ -13,6 +13,10 @@ message(STATUS "VCPKG_TARGET_TRIPLET = ${VCPKG_TARGET_TRIPLET}")
 add_executable(LiveTranscoder
     src/main.cpp
     src/Transcoder.cpp
+    src/Remux.cpp
+    src/FileTranscode.cpp
+    src/EncoderSetup.cpp
+    src/HlsVod.cpp
 )
 
 target_include_directories(LiveTranscoder PRIVATE

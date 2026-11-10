@@ -1,17 +1,9 @@
 #pragma once
 
+#include "TranscodeOptions.h"
+
 #include <optional>
 #include <string>
-
-struct TranscodeOptions {
-    int width = 1280;
-    int height = 720;
-    int videoBitrate = 2'500'000;
-    int audioBitrate = 128'000;
-    int audioSampleRate = 48'000;
-    int gopSize = 60;
-    bool verbose = true;
-};
 
 class Transcoder {
 public:
@@ -22,6 +14,10 @@ public:
         std::string& error
     );
 
-private:
-    static std::string makeError(int errnum);
+    bool transcodeHls(
+        const std::string& inputUrl,
+        const std::string& outputDir,
+        const HlsRequest& request,
+        std::string& error
+    );
 };
